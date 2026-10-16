@@ -33,9 +33,10 @@ change-id：`pet-desktop-companion`｜UID：`UID-20261014232746-桌面宠物属�
 | 宿主 `git status` | **clean**（提交后 0 行；提交 `2156bcd`，26 文件 +4439/−255） |
 | 宿主质量门槛（合并前复跑） | `typecheck` **0 error**；`lint` **0 error**（4 条既有 prettier warning 在 `test/settings-network-layout.test.ts`，本次未触碰）；`test` **793 passed + 5 skipped** |
 | 扩展质量门槛 | `npm test` **170 passed / 0 fail**；`npm run build` 成功且产物 **js+css 双 grep** 禁止项全 0；`vue-tsc --noEmit` **0 error**；`npm run pack` **18 条目**回读自检通过（`out/pet-1.0.0.oix`，1,637,311 B） |
-| 宿主 PR | **#130** `feat: 新增扩展 overlay 窗体能力与 progress 设置字段，apiVersion 升至 2`（head `feat/extension-overlay-window` → base `master`）；CI `check` 通过后由 AI **squash 合并并删除源分支**（AGENTS.md ADR-0008） |
-| `npm run security:audit` | **found 0 vulnerabilities**（exit 0） |
-| Dependabot 开放告警 | **0 条**（`GET /repos/obox-org/obox/dependabot/alerts?state=open`） |
+| 宿主 PR | **#130** `feat: 新增扩展 overlay 窗体能力与 progress 设置字段，apiVersion 升至 2`（head `feat/extension-overlay-window` → base `master`）；CI `check` = **completed/success**、`mergeable_state=clean` ⇒ **已 squash 合并**：merge sha **`a06bf98`**（提交标题 `…(#130)`），源分支 `feat/extension-overlay-window` **已删除**；本地 master 已 `pull --ff-only` 同步、工作区 clean |
+| `npm run security:audit`（**合并后**复跑，AGENTS.md 强制） | **found 0 vulnerabilities**（exit 0） |
+| Dependabot 开放告警（**合并后**复查） | **0 条**（`GET /repos/obox-org/obox/dependabot/alerts?state=open`） |
+| 宿主门槛（**合并后**复跑，`src/**` 有改动 ⇒ 必须） | `typecheck` **0 error**；`lint` **0 error**（4 条既有 warning）；`test` **793 passed + 5 skipped**（exit 0） |
 | 扩展仓自检 | `dependencies = {}`（**运行时零依赖**）；devDependencies = `@vitejs/plugin-vue ^6.0.2` / `vite ^7.2.6` / `vue ^3.5.25`（仅构建期） |
 | 扩展仓远端 | `obox-org/pet`（public，本次新建；与 `obox-org/rdp`、`obox-org/webapp` 同惯例） |
 | 扩展 tag / release | `v1.0.0`（与 `manifest.json` 的 `version: 1.0.0` 一致）+ release 附 `pet-1.0.0.oix` |
