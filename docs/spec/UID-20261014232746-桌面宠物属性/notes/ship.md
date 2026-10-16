@@ -39,6 +39,7 @@ change-id：`pet-desktop-companion`｜UID：`UID-20261014232746-桌面宠物属�
 | 宿主门槛（**合并后**复跑，`src/**` 有改动 ⇒ 必须） | `typecheck` **0 error**；`lint` **0 error**（4 条既有 warning）；`test` **793 passed + 5 skipped**（exit 0） |
 | 扩展仓自检 | `dependencies = {}`（**运行时零依赖**）；devDependencies = `@vitejs/plugin-vue ^6.0.2` / `vite ^7.2.6` / `vue ^3.5.25`（仅构建期） |
 | 扩展仓远端 | `obox-org/pet`（public，本次新建；与 `obox-org/rdp`、`obox-org/webapp` 同惯例） |
-| 扩展 tag / release | `v1.0.0`（与 `manifest.json` 的 `version: 1.0.0` 一致）+ release 附 `pet-1.0.0.oix` |
+| 扩展 tag / release | `v1.0.0`（与 `manifest.json` 的 `version: 1.0.0` 一致）+ release 附 `pet-1.0.0.oix`（1,637,311 B，SHA-256 `34B52E18…CD99`）；release 地址 **https://github.com/obox-org/pet/releases/tag/v1.0.0**；仓库 **https://github.com/obox-org/pet**（本次新建，public） |
+| 宿主 PR 链接 | **https://github.com/obox-org/obox/pull/130**（已合并，merge sha `a06bf98`） |
 | 归档 | 交付归档 `extensions/pet/docs/spec/UID-20261014232746-桌面宠物属性/`（34 文件）；工具归档 `openspec/changes/archive/2026-10-16-pet-desktop-companion/`（34 文件，手工移动——`openspec` CLI 未安装） |
 | 未决项移交 | **O-1**（Tab 经 ✕→精灵时面板闪关一次，无法判定是否卡 17 引入）、**R10**（宿主既有 4 条 prettier warning）、**A-1**（宿主 `core/host.ts:779-780` JSDoc 错位）⇒ 均为"登记不阻塞"；**`run-left/right` 的原地侧向跑**为可逆决策（观感不佳即从随机集删两项）；**N13/N14**（10 秒随机表演观感、图标白线可读性）由 9.2 实机复验补证 |
