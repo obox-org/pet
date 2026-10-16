@@ -1,0 +1,25 @@
+{
+  "name": "pet",
+  "version": "1.0.0",
+  "displayName": "宠物",
+  "author": "chenzhi",
+  "description": "桌面宠物：右下角无边框透明窗体，喂食/洗澡/玩耍影响饥饿度、清洁度与心情",
+  "apiVersion": 2,
+  "main": "./index.js",
+  "contributes": {
+    "statusBarItems": [
+      { "id": "pet.status", "name": "宠物", "text": "宠物", "alignment": "right", "priority": 10 }
+    ],
+    "settings": {
+      "id": "pet.settings",
+      "title": "宠物",
+      "fields": [
+        { "key": "pet.visible", "label": "显示宠物", "type": "boolean", "default": true },
+        { "key": "pet.hunger", "label": "饥饿度", "type": "progress", "max": 100, "default": 100 },
+        { "key": "pet.clean", "label": "清洁度", "type": "progress", "max": 100, "default": 100 },
+        { "key": "pet.mood", "label": "心情", "type": "progress", "max": 100, "default": 100 },
+        { "key": "pet.diagnostic", "label": "诊断", "type": "status", "default": "" }
+      ]
+    }
+  }
+}

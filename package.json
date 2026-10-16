@@ -1,0 +1,20 @@
+{
+  "name": "pet-ext",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "桌面宠物：右下角无边框透明窗体，喂食/洗澡/玩耍影响饥饿度、清洁度与心情",
+  "author": "chenzhi",
+  "scripts": {
+    "test": "node --test",
+    "pack": "npm run build && node scripts/pack.mjs",
+    "release": "npm run test && npm run pack",
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.2",
+    "vite": "^7.2.6",
+    "vue": "^3.5.25"
+  }
+}

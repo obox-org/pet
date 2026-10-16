@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      刻意不声明配色方案（color-scheme）：窗体是透明覆盖层，声明配色方案会让浏览器给画布
+      铺一层默认底色，直接破坏 specs/pet-window 的"空白区完全透出桌面"判据（design D-11）。
+      标题只是窗体标题（overlay 不占任务栏），界面文案全在页面里、全中文。
+    -->
+    <title>宠物</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

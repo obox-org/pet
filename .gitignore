@@ -1,0 +1,8 @@
+# 依赖与构建产物：不进 git（dist/ 由 vite 重建、out/*.oix 由 npm run pack 现打）
+node_modules/
+dist/
+out/
+
+# 日志与缓存
+*.log
+.eslintcache

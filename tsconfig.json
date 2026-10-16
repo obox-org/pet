@@ -1,0 +1,29 @@
+{
+  // 页面侧（app/**）的类型检查配置。
+  //
+  // 只覆盖 app/**：vite.config.ts 里 import 了 node:url / node:path，需要 @types/node，
+  // 而本扩展的 devDependencies 没有它（package.json 属别的任务卡所有权，本卡不改）；
+  // 把配置文件排除在外，类型检查才不会被"找不到 node 内置模块类型"污染。
+  // 构建本身不受影响：vite 用 esbuild 转译配置文件，不做类型检查。
+  //
+  // 用法（本扩展 package.json 没有 typecheck 脚本，用宿主仓库已装的 vue-tsc 直接跑）：
+  //   node ../../node_modules/vue-tsc/bin/vue-tsc.js --noEmit -p tsconfig.json
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    // 不自动引入任何 @types（TS 会向上层目录找 node_modules/@types，这里显式关掉，保证检查是可复现的）
+    "types": [],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["app/**/*.ts", "app/**/*.d.ts", "app/**/*.vue"]
+}
