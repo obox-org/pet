@@ -8,11 +8,11 @@
 | created | 2026-10-14 |
 | 归档时间 | 2026-10-16 |
 | 当前阶段 | **九步链已完成**（init → grill → proposal → design → validation → task → dev → check → ship） |
-| 交付物 | **`v1.0.1`**：`out/pet-1.0.1.oix`（1,644,100 B，18 个条目；SHA-256 `3C732F0C8AFCFFCF6FE9F2BF5BFCECA4E6268F492ACAB6D9296BA201ABD1EBA5`）<br>首发 `v1.0.0`：`out/pet-1.0.0.oix`（1,637,311 B） |
+| 交付物 | **`v1.0.2`**：`out/pet-1.0.2.oix`（1,644,448 B，18 个条目；SHA-256 `17883A050A4EA596FB0099BDDA3D4B3A000724F4AC14F6C881A59B6AC5AC5102`）<br>历史：`v1.0.1`（1,644,100 B）/ `v1.0.0`（1,637,311 B） |
 | 依赖宿主 | `apiVersion >= 2` ⇒ **obox v1.0.16** 起 |
-| 发布 | 扩展仓 `obox-org/pet`：release [v1.0.1](https://github.com/obox-org/pet/releases/tag/v1.0.1)（热修）/ [v1.0.0](https://github.com/obox-org/pet/releases/tag/v1.0.0) |
+| 发布 | 扩展仓 `obox-org/pet`：release [v1.0.2](https://github.com/obox-org/pet/releases/tag/v1.0.2) / [v1.0.1](https://github.com/obox-org/pet/releases/tag/v1.0.1) / [v1.0.0](https://github.com/obox-org/pet/releases/tag/v1.0.0) |
 | 归档方式 | 工具归档为**手工移动**（`openspec` CLI 未安装）⇒ `openspec/changes/archive/2026-10-16-pet-desktop-companion/` |
-| 发版后热修 | **v1.0.1**（`notes/hotfix-v1.0.1.md`）：随机表演播完不回落（D-1）+ 互动姿态挂到下一次推送（老毛病，R54）+ ✕ 焦点环统一（R53）；实机复验证据见 `notes/evidence/real-window-v2.md` 的「卡 18 后复验」节 |
+| 发版后热修 | **v1.0.1**（`notes/hotfix-v1.0.1.md`）：随机表演播完不回落（D-1）+ 互动姿态挂到下一次推送（老毛病，R54）+ ✕ 焦点环统一（R53）<br>**v1.0.2**（`notes/hotfix-v1.0.2.md`）：随机表演周期 10 秒 → **1 分钟**（用户改判；含"两侧常量逐值相等"新门禁与 `index.js` 7 处注释同步）<br>实机复验证据见 `notes/evidence/real-window-v2.md` 的「卡 18 后复验」节 |
 
 **双向映射（三方一致）**：`.openspec.yaml` 的 `uid: UID-20261014232746-桌面宠物属性` ↔ 本目录名 ↔ `change-id: pet-desktop-companion`（归档目录名 `2026-10-16-pet-desktop-companion`）。
 
