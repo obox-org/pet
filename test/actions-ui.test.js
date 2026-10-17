@@ -16,6 +16,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+// 卡 22（v1.0.2）：入口的单一来源常量，用来把"页面镜像"与它钉成逐值相等
+import { RANDOM_PERF_EVERY_SEC as ENTRY_RANDOM_PERF_EVERY_SEC } from '../lib/constants.js'
 
 const read = (rel) => readFileSync(new URL('../' + rel, import.meta.url), 'utf8')
 
@@ -352,8 +354,8 @@ test('卡18 · 页面映射：trot→running(7)、run-left→running-left(2)、r
   assert.equal(/SELF_BURST_SET\s*[:=]/.test(animTs), false, '同名集合声明已删（防回归）')
 })
 
-test('卡18 · 页面周期镜像 = 10 秒；且它有真实消费者（锁存看门狗），不是装饰常量', () => {
-  assert.match(animTs, /export const RANDOM_PERF_EVERY_SEC = 10/, '镜像入口 RANDOM_PERF_EVERY_SEC = 10')
+test('卡18/22 · 页面周期镜像 = 1 分钟（60 秒）；且它有真实消费者（锁存看门狗），不是装饰常量', () => {
+  assert.match(animTs, /export const RANDOM_PERF_EVERY_SEC = 60/, '镜像入口 RANDOM_PERF_EVERY_SEC = 60')
   assert.match(animTs, /export const RANDOM_PERF_PERIOD_MS = RANDOM_PERF_EVERY_SEC \* 1000/, '换算成毫秒')
   assert.match(app, /import \{[^}]*RANDOM_PERF_PERIOD_MS[^}]*\} from '\.\/lib\/anim'/, 'App.vue 真的引用它')
   const watchdog = app.slice(app.indexOf('function armBurstWatchdog()'), app.indexOf('async function resyncBurst()'))
@@ -364,6 +366,22 @@ test('卡18 · 页面周期镜像 = 10 秒；且它有真实消费者（锁存�
   assert.match(resync, /bridge\.request\('pet\.state'/, '补拉一次权威状态')
   assert.match(resync, /applyState\(data\.state, true\)/, '拿到权威状态 ⇒ force 重播/解锁')
   assert.match(resync, /if \(!ok \|\| !data \|\| data\.state === undefined\) return/, '拉不到就保持锁存（不退化成"一直跑"）')
+})
+
+test('卡22 · 两侧常量相等：入口 lib/constants.js 与页面镜像 app/lib/anim.ts 的周期逐值一致（只改一侧即红）', () => {
+  // 为什么必须钉住：入口按这个周期排 `pet-perf`，页面用**同一个**周期当锁存看门狗的上限
+  //（"整整一个周期收不到新状态 ⇒ 补拉一次 pet.state"）。两侧是两套构建、无法共享模块，
+  // 只改一侧就会让"看门狗认为的周期"与"入口真实的推送周期"脱节（改小 ⇒ 无谓补拉；改大 ⇒ 画面钉住）。
+  const mirror = /export const RANDOM_PERF_EVERY_SEC = (\d+)/.exec(animTs)
+  assert.ok(mirror, '页面镜像常量存在（app/lib/anim.ts）')
+  assert.equal(
+    Number(mirror[1]),
+    ENTRY_RANDOM_PERF_EVERY_SEC,
+    `页面镜像周期（${mirror[1]}s）MUST 与入口单一来源 lib/constants.js 的 RANDOM_PERF_EVERY_SEC（${ENTRY_RANDOM_PERF_EVERY_SEC}s）逐值相等`
+  )
+  // 反向自检：镜像确实是**从源码里读出来的数**，不是"恰好等于 60"的假绿
+  assert.equal(ENTRY_RANDOM_PERF_EVERY_SEC, 60, 'v1.0.2：入口值为 1 分钟（60 秒）')
+  assert.equal(Number(mirror[1]), 60, 'v1.0.2：页面镜像值同为 1 分钟（60 秒）')
 })
 
 test('卡18/19 · 入口自发表演的本地锁存：播完一轮置锁存、收包驱动重播、锁存期间 status/row 双双降级', () => {

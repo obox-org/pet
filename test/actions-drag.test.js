@@ -300,7 +300,7 @@ test('卡15 拖动 · 兜底再兜底：create 与 setPosition 都不回传 posi
 test('卡18 拖动 · 互斥①：拖动中到点不表演（周期定时器不挂摘，由 dragging 判定跳过），松手后照常', async (t) => {
   const { rec, cleanup, perf } = activate(t)
   await flush()
-  assert.ok(rec.timers.has('pet-perf'), '启动即注册了 10 秒周期的随机表演定时器（与窗体状态无关）')
+  assert.ok(rec.timers.has('pet-perf'), '启动即注册了 1 分钟（60 秒）周期的随机表演定时器（与窗体状态无关）')
 
   await rec.send('pet.drag', { phase: 'start' })
   assert.ok(rec.timers.has('pet-perf'), 'D-13：拖动不摘定时器（Q16 起它是周期性的，靠触发时判定让位）')

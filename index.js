@@ -377,7 +377,7 @@ export default function pet(api) {
    * 为"当前这一轮 transient"排一次到期推送（`pet-transient`，一次性 setTimeout）。
    *
    * **为什么必须有它**：入口的 `state.transient` 到期**不会自己推送**——`resolveStatus` 只是不再认它，
-   * 下一次 rev++ 要等 `pet-tick`（15 秒，且只在属性真的变化时）或下一轮 `pet-perf`（10 秒）。
+   * 下一次 rev++ 要等 `pet-tick`（15 秒，且只在属性真的变化时）或下一轮 `pet-perf`（1 分钟 / 60 秒）。
    * 页面因此在"用户点出来的那一轮"播完后仍按最近一次视图的 `anim.status` 继续渲染该轨
    * （进食/洗澡姿态挂着，最长 15 秒）——复验报告 D-1「影响面 ③」记的就是这条。
    * 页面侧**不能**自己按本地轮长折 idle：`prefers-reduced-motion: reduce`（400ms/帧）下页面轮长会
@@ -434,10 +434,10 @@ export default function pet(api) {
 
   // ————— 随机表演（design D-14 改版 / 用户裁定 Q16；specs/pet-sprites 的随机表演 requirement） —————
   /**
-   * 每 10 秒随机播一轮"表演型"动作（`RANDOM_PERF_EVERY_SEC` / `RANDOM_PERF_SET` 是单一来源）。
+   * 每 1 分钟（60 秒）随机播一轮"表演型"动作（`RANDOM_PERF_EVERY_SEC` / `RANDOM_PERF_SET` 是单一来源；**卡 22 / v1.0.2 用户裁定：原来的 10 秒太频繁 ⇒ 改为 1 分钟（60 秒）**）。
    *
    * 为什么用**周期定时器**（`api.timer.setInterval`，宿主级、整数秒）：`api-reference.md:405-414` 的
-   * timer 只收 1–86400 的整数秒，10 秒合法；宿主级定时器在主窗口最小化时**不**被节流
+   * timer 只收 1–86400 的整数秒，1 分钟（60 秒）合法；宿主级定时器在主窗口最小化时**不**被节流
    * （渲染进程的 setTimeout 会被节流到 1s 粒度，周期会漂）。Q10/Q14 那套"2–5 分钟随机
    * `setTimeout` + `trotArmed` 重排"的独立定时器随之整条退役（design D-14"trot 定时器退役"）。
    *
@@ -529,7 +529,7 @@ export default function pet(api) {
               overlayAlive = false
               return
             }
-            // 卡 18（Q16）：随机表演不再需要"窗体就位时立刻排一次"——它是与窗体无关的 10 秒周期
+            // 卡 18（Q16）：随机表演不再需要"窗体就位时立刻排一次"——它是与窗体无关的 1 分钟（60 秒）周期
             // 定时器（onRandomPerf 每轮自己看 overlayAlive）。toggle 关→开之间的空转被这一条挡掉。
             // 卡 19（R54）：**唯独**"transient 到期推送"要在重建时补排——销毁路径会清掉它
             // （见下面 else 分支），若用户在某一轮还没到期时关→开（1.x 秒内），不补这一手
@@ -576,7 +576,7 @@ export default function pet(api) {
       hub.wake()
       void persistState(now)
     }
-    // 卡 18（Q16）：随机表演是**独立周期**（10 秒的 pet-perf 定时器），tick 不再负责任何一次排程
+    // 卡 18（Q16）：随机表演是**独立周期**（1 分钟 / 60 秒的 pet-perf 定时器），tick 不再负责任何一次排程
     // （Q10/Q14 的"每次回落 idle 后重排随机 2–5 分钟"随 trot 定时器一并退役）。
   }
 
@@ -712,7 +712,7 @@ export default function pet(api) {
 
             if (phase === 'start') {
               dragging = true
-              // D-13 互斥①：拖动期间不触发随机表演。卡 18 起不需要"清定时器"——10 秒周期定时器
+              // D-13 互斥①：拖动期间不触发随机表演。卡 18 起不需要"清定时器"——1 分钟（60 秒）周期定时器
               // 一直在跑，靠 onRandomPerf 入口处的 `dragging` 判定跳过（拖动结束自动恢复，无需重排）。
               // D-13 互斥②：拖动是用户交互 ⇒ 刷新 lastInteractAt，sleep 判定不推进；
               // 加上 buildView 的 dragging 折叠（sleep/入口自发表演 → idle、气泡置 null），
@@ -799,7 +799,7 @@ export default function pet(api) {
       if (!lastCreateFailed) resetDiagnostic()
       // tick 最后起：onTick 依赖 state 就绪；15 秒节拍（api.timer 单位是秒，api-reference.md:405-414）
       api.timer.setInterval(TICK_ID, TICK_SECONDS, onTick)
-      // 随机表演的周期定时器（卡 18 / Q16：10 秒一轮，宿主级定时器不被后台节流）。
+      // 随机表演的周期定时器（卡 18 / Q16：1 分钟（60 秒）一轮，宿主级定时器不被后台节流）。
       // 与 tick 一样**无条件注册**：是否真的表演由 onRandomPerf 每轮自己判定（打盹不打扰、
       // 拖动中不跑、无窗体的空转直接返回），所以不需要随 toggle/入睡反复挂摘。
       api.timer.setInterval(RANDOM_PERF_TIMER_ID, RANDOM_PERF_EVERY_SEC, onRandomPerf)

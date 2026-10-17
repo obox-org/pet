@@ -3,14 +3,17 @@
  *
  * 本文件由卡 15 的"自发原地小跑（trot）"用例改写而来：Q16 把"2–5 分钟独立小跑定时器"
  * （`TROT_TIMER_ID`/`TROT_MS`/`TROT_MIN_SEC`/`TROT_MAX_SEC`/`trotUntil`）整条退役，
- * 换成**每 10 秒从 7 项"表演型"随机集里抽一条播一轮**；trot 作为状态条目保留（= 原地跑一轮），
+ * 换成**每 1 分钟（60 秒）从 7 项"表演型"随机集里抽一条播一轮**；trot 作为状态条目保留（= 原地跑一轮），
  * 并且 `run-left`(row2)/`run-right`(row1) 终于被引用——但**只原地播帧，绝不位移**。
  *
- * 覆盖任务卡验收 ①（周期 10s、随机集恰 7 项且不含状态指示轨、播一轮后回落、sleep 期间不触发、
+ * **卡 22（v1.0.2）**：周期由 10 秒改为 **60 秒**（用户裁定"每次动画只播放一次，间隔 1min 播放一次"），
+ * 本文件里所有"10 秒"的期望值随之改为 60；其余语义（一轮、回落、门控、零副作用）一字未动。
+ *
+ * 覆盖任务卡验收 ①（周期 60s、随机集恰 7 项且不含状态指示轨、播一轮后回落、sleep 期间不触发、
  * 用户互动可随时抢占、不耗道具/不改数值/不弹气泡、侧跑轨零 `setPosition`）与负向自检
  * （随机集被人改动即红；`sleep` 到期不播；喂食抢占；零位移）。
  *
- * 定时器用**宿主级** `api.timer.setInterval('pet-perf', 10, cb)`（整数秒 1–86400，
+ * 定时器用**宿主级** `api.timer.setInterval('pet-perf', 60, cb)`（整数秒 1–86400，
  * api-reference.md:405-414,552-572）：主窗口最小化时渲染进程 setTimeout 会被节流到 1s 粒度，
  * 周期会漂。mock 只记录、不自动到点，测试手动 `cb()` 触发；抽签用 `t.mock.method(Math,'random')`
  * 钉死（`Math.floor(r * 7)` 落点 ⇒ `(i + 0.5) / 7` 必抽第 i 项）。
@@ -102,8 +105,9 @@ function activate(t, opts = {}) {
 
 // ————— 周期与随机集常量（负向自检的门禁） —————
 
-test('卡18 随机表演 · 周期 10 秒：宿主级 setInterval 注册（整数秒合法），cleanup 与 pet-tick 一起清', async (t) => {
-  assert.equal(RANDOM_PERF_EVERY_SEC, 10, 'Q16：每 10 秒一轮（逐字钉住，改参数就会红）')
+test('卡18/22 随机表演 · 周期 1 分钟（60 秒）：宿主级 setInterval 注册（整数秒合法），cleanup 与 pet-tick 一起清', async (t) => {
+  // 卡 22（v1.0.2）：用户裁定"间隔 1min 播放一次，而不是 10s 播放一次" ⇒ 常量逐字钉住
+  assert.equal(RANDOM_PERF_EVERY_SEC, 60, 'v1.0.2：每 1 分钟（60 秒）一轮（逐字钉住，改参数就会红）')
   assert.ok(
     Number.isInteger(RANDOM_PERF_EVERY_SEC) &&
       RANDOM_PERF_EVERY_SEC >= 1 &&
@@ -112,7 +116,9 @@ test('卡18 随机表演 · 周期 10 秒：宿主级 setInterval 注册（整�
   )
   const { rec, cleanup, perfSeconds, perfOps } = activate(t)
   await flush()
-  assert.equal(perfSeconds(), 10, 'pet-perf 的周期就是 10 秒')
+  // mock timer 记录的**实际注册秒数**：注册处只许引用常量，不得留第二份字面量
+  assert.equal(perfSeconds(), 60, 'pet-perf 的周期就是 60 秒（mock timer 记录的 seconds）')
+  assert.equal(perfSeconds(), RANDOM_PERF_EVERY_SEC, '注册秒数 === 单一来源常量（无第二份字面量）')
   assert.deepEqual(perfOps(), ['setInterval'], '周期触发（不是一次性 setTimeout）')
   assert.ok(rec.timers.has(TICK_ID), '结算时钟照旧')
   cleanup()
@@ -137,14 +143,15 @@ test('卡18 随机表演 · 随机集恰 7 项、逐项是合法状态轨，且 
   }
 })
 
-test('卡18 · 周期关系（R40 退役后的平凡断言）：10s ≪ 10 分钟入睡阈值，入睡前容得下足够多轮', () => {
+test('卡18/22 · 周期关系（R40 退役后的平凡断言）：60s ≪ 10 分钟入睡阈值，入睡前仍容得下 10 轮', () => {
   const SLEEP_AFTER_SEC = SLEEP_AFTER_MS / 1000
   assert.equal(SLEEP_AFTER_SEC, 600, '入睡阈值 = 10 分钟（design D-7）')
   assert.ok(
     RANDOM_PERF_EVERY_SEC < SLEEP_AFTER_SEC,
     `随机周期（${RANDOM_PERF_EVERY_SEC}s）MUST 小于入睡阈值（${SLEEP_AFTER_SEC}s）`
   )
-  assert.ok(RANDOM_PERF_EVERY_SEC * 60 <= SLEEP_AFTER_SEC, '入睡前至少容得下 60 轮表演（够活泼）')
+  // 卡 22：周期 10s → 60s 后这条关系仍成立（600 / 60 = 10 轮；原先按 10s 写的是"至少 60 轮"）
+  assert.ok(RANDOM_PERF_EVERY_SEC * 10 <= SLEEP_AFTER_SEC, '入睡前至少容得下 10 轮表演')
 })
 
 // ————— 纯函数层：映射、优先级、transient 集合 —————

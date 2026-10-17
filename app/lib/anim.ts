@@ -33,16 +33,19 @@ export const VITAL_LOW = 30
 export const REDUCED_FRAME_MS = 400
 
 /**
- * 入口随机表演的周期（design D-14 / Q16：**每 10 秒**一轮）。
+ * 入口随机表演的周期（design D-14 / Q16；**v1.0.2 用户裁定：10 秒太频繁 ⇒ 每 1 分钟（60 秒）一轮**）。
  *
  * 单一来源在入口 `lib/constants.js` 的 `RANDOM_PERF_EVERY_SEC`（排程也在入口）；页面这份是**镜像**，
  * 只服务一件事：给"入口自发表演的本地锁存"加一个**看门狗上限**（见 App.vue 的 armBurstWatchdog）。
- * 入口每 10 秒必推一次新 rev（随机表演的排程在入口），所以"锁存后整整一个周期都没等到新状态"
+ * 入口每 1 分钟必推一次新 rev（随机表演的排程在入口），所以"锁存后整整一个周期都没等到新状态"
  * 只可能是推送断了（打盹不再表演 / 窗体停用 / 桥断）——那时继续锁存只会把画面钉住。
+ *
+ * 两侧必须**逐值相等**（只改一侧就会让看门狗与排程脱节）：
+ * `test/actions-ui.test.js` 有一条"两侧常量相等"的断言把入口值与本文件的镜像值钉在一起。
  */
-export const RANDOM_PERF_EVERY_SEC = 10
+export const RANDOM_PERF_EVERY_SEC = 60
 
-/** 周期换算成毫秒（看门狗用；`10 × 1000 = 10000ms`） */
+/** 周期换算成毫秒（看门狗用；`60 × 1000 = 60000ms`） */
 export const RANDOM_PERF_PERIOD_MS = RANDOM_PERF_EVERY_SEC * 1000
 
 /**

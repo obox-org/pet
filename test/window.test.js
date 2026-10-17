@@ -187,7 +187,7 @@ test('pet-window · 重复激活（停用后再启用）：先 cleanup 再注册
   const cleanup2 = pet(api)
   await flush()
   // 卡 15 起入口有两只定时器：结算时钟 pet-tick + 自发动作；卡 18（Q16）起第二只从
-  // 一次性 `pet-trot` 换成周期性的 `pet-perf`（每 10 秒随机表演一轮）。
+  // 一次性 `pet-trot` 换成周期性的 `pet-perf`（每 1 分钟（60 秒）随机表演一轮；卡 22 前是 10 秒）。
   // 断言"只有一份"要按 id 数，不能只看 size —— 同 id 重复 setInterval/setTimeout 会被宿主重置，不叠加。
   assert.equal(rec.timers.size, 2, '一份 pet-tick + 一份 pet-perf（无双份）')
   assert.ok(rec.timers.has('pet-tick'), 'pet-tick 只有一份')

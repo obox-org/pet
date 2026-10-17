@@ -66,6 +66,8 @@
 
 ### Requirement: 状态机 SHALL 每 10 秒自发播放一次随机「表演型」动画；状态指示轨（hungry/dirty/sad/sleep）MUST NOT 参与随机
 
+> **v1.0.2 修订（2026-10-16）**：周期由 **10 秒**改为 **1 分钟（60 秒）**——用户实机体验后**改判**（原话"间隔1min播放一次，而不是10s钟播放一次"），**只改周期**，其余语义不变。本条与下面 scenario 里的"10 秒"是**发版时的原始口径**，保留以存史；**实现以 v1.0.2 为准**，详见 `notes/hotfix-v1.0.2.md`（含两侧常量相等的新门禁与负向自检）。
+
 随机集（单一来源 `lib/constants.js`）= `eating` / `bathing` / `petted` / `playing` / `trot` / `run-left` / `run-right` 七项；随机挑选后播放**一轮**（约 1.4–1.6s），播完回落到当前状态判定。**不消耗道具、MUST NOT 改变任何属性/库存/成长值、MUST NOT 弹气泡**。优先级低于真实互动（用户互动可随时打断），且 MUST NOT 推进或重置 `lastInteractAt`。`sleep`（连续 10 分钟无交互）期间 MUST NOT 触发。`running-left`(2) / `running-right`(1) 两轨 SHALL 只做**原地**播放——MUST NOT 移动窗体、MUST NOT 改变窗体位置。
 
 #### Scenario: 每 10 秒随机表演一轮
