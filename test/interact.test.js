@@ -61,9 +61,11 @@ test('pet-interaction · 喂食生效：小鱼干 -1、饥饿度 +5、anim 切 e
   assert.equal(r.state.fish, 1)
   assert.equal(r.state.hunger, 45)
   assert.equal(r.feedback.text, TEXT.feedOk) // 卡 15：'呜哇！小鱼干好好吃！'（上游逐字，原为'吃饱啦（饥饿度 +5）'）
-  // anim 契约：eating → 图集第 4 行（jumping），label 中文'喂食'
+  // anim 契约：eating → 图集第 4 行（jumping），label 中文'喂食'；
+  // 卡 19：真实互动写下的 transientSelf=false ⇒ 视图 anim.self=false（不是自发表演，页面不许折它）
   const view = buildView(r.state, now)
-  assert.deepEqual(view.anim, { row: 4, label: '喂食', status: 'eating' })
+  assert.deepEqual(view.anim, { row: 4, label: '喂食', status: 'eating', self: false })
+  assert.equal(r.state.transientSelf, false, '互动写的 transient 来源标记恒为 false')
   assert.equal(resolveStatus(r.state, now), 'eating')
   // 瞬时互动播完一轮（1600ms）后回落到属性判定
   assert.equal(resolveStatus(r.state, now + TRANSIENT_MS.eating), 'idle')
@@ -76,7 +78,7 @@ test('pet-interaction · 玩耍不耗道具：心情 +5、播放 playing 行动�
   assert.equal(r.state.mood, 65)
   assert.equal(r.state.fish, 0, '鱼干不变')
   assert.equal(r.state.bubble, 0, '泡泡不变')
-  assert.deepEqual(buildView(r.state, now).anim, { row: 7, label: '玩耍', status: 'playing' })
+  assert.deepEqual(buildView(r.state, now).anim, { row: 7, label: '玩耍', status: 'playing', self: false })
 })
 
 test('pet-interaction · 瞬时互动优先且播完回落：饥饿 <30 时喂食 ⇒ 先 eating，一轮后回落 hungry', () => {

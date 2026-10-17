@@ -32,11 +32,18 @@ export interface StateBubble {
 }
 
 /**
- * design D-3 定义的 `PetStateView`（anim 经卡 12/裁定 R14 增补 `status`）。
+ * design D-3 定义的 `PetStateView`（anim 经卡 12/裁定 R14 增补 `status`、卡 19 增补 `self`）。
  * `anim.status` = 机器可读英文 key（十二个状态之一，入口 `resolveStatus` 的返回值；
  * 卡 18 / Q16 起含入口自发表演的 `trot`/`run-left`/`run-right`）；
  * `anim.label` = 中文状态名，仅供显示。归一化后 `status` 必有（**必填**）：
  * 入口没给（老数据/畸形数据）时为空串 `''`，页面 `knownStatus` 视为"没给"并走 label 反查/row 兜底。
+ *
+ * `anim.self`（卡 19 · 热修 D-1）= **当前 transient 是不是入口自发写的随机表演**。
+ * 它是"本地一轮播完要不要折回呼吸 idle"的**唯一**判据：随机集的
+ * `eating`/`bathing`/`petted`/`playing` 四项与真实互动同名同轨（随机抽到的 `eating` 与用户点喂食
+ * 在两边都是 `'eating'`），靠状态字符串区分不出来——这正是 D-1 的根因。
+ * 归一化时**只认真布尔 `true`**：`'true'`/`1`/`null`/缺失一律 false（畸形的入口回包宁可
+ * 少折一轮，也不能把用户刚点的互动吞掉）。本字段必填且有明确语义（false = "不是自发表演"）。
  *
  * 卡 17（Q15=B）：卡 15 增补的顶层 `hidden` 字段已随该功能整条移除——宠物要么显示（窗体在），
  * 要么关闭（设置页 toggle 关 = 销毁窗体，真省 CPU）；页面**不再**有任何"只画一个小按钮"的中间态。
@@ -47,7 +54,7 @@ export interface PetStateView {
   vitals: Vitals
   items: Items
   growth: Growth
-  anim: { row: number; label: string; status: string }
+  anim: { row: number; label: string; status: string; self: boolean }
   bubble: StateBubble | null
 }
 
@@ -178,10 +185,12 @@ export function normalizeState(raw: unknown): PetStateView {
     },
     // row = -1 表示"入口没给行号"，decideAnimation 据此改走属性判定，而不是当成第 0 行
     // status = '' 表示"入口没给机器可读 key"（老数据），decideAnimation 回退中文 label 反查/row 兜底
+    // self：只认真布尔 true（卡 19 负向自检：畸形的 self 归一 false ⇒ 页面不会误折用户刚点的互动）
     anim: {
       row: Math.floor(num(animRaw.row, -1)),
       label: typeof animRaw.label === 'string' ? animRaw.label : '',
-      status: typeof animRaw.status === 'string' ? animRaw.status : ''
+      status: typeof animRaw.status === 'string' ? animRaw.status : '',
+      self: animRaw.self === true
     },
     bubble: normalizeBubble(obj.bubble)
   }
@@ -196,6 +205,6 @@ export const DEFAULT_STATE: PetStateView = {
   vitals: { hunger: 100, clean: 100, mood: 100 },
   items: { fish: 3, bubble: 3 },
   growth: { value: 0, rank: 0, rankName: RANK_NAMES[0] },
-  anim: { row: -1, label: '', status: '' },
+  anim: { row: -1, label: '', status: '', self: false },
   bubble: null
 }

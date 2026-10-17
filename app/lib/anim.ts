@@ -93,8 +93,13 @@ export const STATUS_PRIORITY: Record<PetStatus, number> = {
  *
  * 与入口 `lib/mapping.js` 的 `TRANSIENT_STATUSES` **有意不同**：入口那份决定"谁是当前权威状态"
  * （真实互动与入口自发的表演都写进同一个 transient 字段）；页面这份只决定
- * "本地播一轮后自行回落"，`trot`/`run-left`/`run-right` 恰恰需要这个语义——它们是入口自发触发的
- * burst，页面播完一轮就得停下，不能等入口的下一次推送（主窗口被最小化时那次推送可能晚到）。
+ * "本地播一轮后自行回落"。
+ *
+ * 卡 19（热修 D-1）之前，这里还靠一个 `SELF_BURST_SET`（`trot`/`run-left`/`run-right`）
+ * 来区分"入口自发的 burst"与"用户刚点的动作"——那条判据**认不出**同名同轨的四项
+ * （随机抽到的 `eating` 与用户点喂食是完全相同的字符串），是 D-1 的根因，已整条删除。
+ * 现在"这一轮是谁写的"由入口的视图标记 `anim.self` 承担（页面侧判定见 app/lib/burst.ts），
+ * 本集合只回答"哪些状态需要页面自己收尾"。
  */
 const TRANSIENT_SET: ReadonlySet<PetStatus> = new Set<PetStatus>([
   'eating',
@@ -108,20 +113,6 @@ const TRANSIENT_SET: ReadonlySet<PetStatus> = new Set<PetStatus>([
 
 export function isTransient(status: PetStatus): boolean {
   return TRANSIENT_SET.has(status)
-}
-
-/**
- * 只能由入口**自发**触发的表演轨（卡 18 / Q16：`trot` / `run-left` / `run-right`）。
- * 与 `TRANSIENT_SET` 的关系：后者是"播完一轮就回落"的全集（含四条用户点出来的互动），
- * 这一条是它的子集——页面靠它区分"入口自己排的 burst"与"用户刚点的动作"：
- * 入口推来的 burst 要**新起一轮**（还要处理"同一轮里的重复推送"），用户动作的那一轮则由
- * `interact()` 自己起（见 App.vue 的 syncBurst）。判据与入口 `lib/mapping.js` 的 `isSelfBurst` 同名同值。
- */
-const SELF_BURST_SET: ReadonlySet<PetStatus> = new Set<PetStatus>(['trot', 'run-left', 'run-right'])
-
-/** 是否为入口自发的表演轨（入参放宽到 `unknown`：调用方拿到的是回包里的任意字符串） */
-export function isSelfBurst(status: unknown): boolean {
-  return typeof status === 'string' && SELF_BURST_SET.has(status as PetStatus)
 }
 
 /** `pet.interact` 的 kind → 瞬时互动状态（卡 17 起 kind 只有这四种，每一种都对应一条动画轨） */
@@ -151,8 +142,9 @@ const ALL_STATUSES: readonly PetStatus[] = [
  * 机器可读状态 key 的守门员：只认表内十二个英文值，其它（含空串/数字/undefined）视为"没给"。
  * 卡 12（裁定 R14）后它的**主输入是 `anim.status`**（入口 `resolveStatus` 的英文 key，
  * 与 `STATUS_TRACK` 键单一来源一致）——sleep 与 idle 同 row 0，页面全靠它区分慢放与 Zzz 气泡；
- * 卡 15 起 `trot`、卡 18 起 `run-left`/`run-right` 也走这里（与某条真实互动轨同构，
- * 靠它决定"播一轮就回落、且不弹气泡"）。
+ * 卡 15 起 `trot`、卡 18 起 `run-left`/`run-right` 也走这里；
+ * 卡 19 起还是 `syncBurst` 的守门员：入口只有报 `anim.self === true` **且** status 是表内合法值时，
+ * 页面才认这是一轮自发表演（畸形回包不许起一轮，更不许折 idle）。
  */
 export function knownStatus(value: unknown): PetStatus | undefined {
   return typeof value === 'string' && (ALL_STATUSES as readonly string[]).includes(value)

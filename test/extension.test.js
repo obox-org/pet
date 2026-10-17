@@ -131,8 +131,13 @@ test('消息路由 · pet.ready / pet.state ⇒ { ok:true, state:PetStateView }�
     assert.deepEqual(Object.keys(r.state.vitals).sort(), ['clean', 'hunger', 'mood'])
     assert.deepEqual(Object.keys(r.state.items).sort(), ['bubble', 'fish'])
     assert.deepEqual(Object.keys(r.state.growth).sort(), ['rank', 'rankName', 'value'])
-    assert.deepEqual(Object.keys(r.state.anim).sort(), ['label', 'row', 'status'])
-    assert.deepEqual(r.state.anim, { row: 0, label: '待机', status: 'idle' }, '初始全满 ⇒ idle')
+    // 卡 19 起 anim 多一项来源标记 self（无 transient ⇒ false），是"页面折不折 idle"的唯一判据
+    assert.deepEqual(Object.keys(r.state.anim).sort(), ['label', 'row', 'self', 'status'])
+    assert.deepEqual(
+      r.state.anim,
+      { row: 0, label: '待机', status: 'idle', self: false },
+      '初始全满 ⇒ idle'
+    )
     assert.equal(r.state.bubble, null)
     assert.deepEqual(r.state.vitals, { hunger: 100, clean: 100, mood: 100 })
     assert.deepEqual(r.state.items, { fish: 3, bubble: 3 })

@@ -1,6 +1,6 @@
 {
   "name": "pet",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "displayName": "宠物",
   "author": "chenzhi",
   "description": "桌面宠物：右下角无边框透明窗体，喂食/洗澡/玩耍影响饥饿度、清洁度与心情",

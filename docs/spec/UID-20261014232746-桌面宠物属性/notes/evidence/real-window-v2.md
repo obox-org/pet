@@ -266,3 +266,153 @@
 - 双仓零提交、无越界写入：宿主仓 HEAD 仍 `fbdb882d1939f4e3340d4cf1a6476c5430640269`、`git status --short` **24 行**与基线一致；扩展仓仍 **0 提交**、**15 行** untracked 与基线一致（本证据文件落在既有 untracked 目录 `openspec/` 内，不新增条目）。仓库内唯一被写的文件 = 本证据文件。
 - 存档处置：`state.json` 留在 session 3 结束态（`fish:0`、`bubble:3`、三属性 92/79/86、`position:(2148,688)`、`lastPetAt` 有值）；本轮各阶段备份：`%TEMP%\pet-e2e2\state-backup\state.json.q15pre`（本轮开始前）、`state.json.q15mid`（fixture 前）、`state.json.orig`（卡 16 的重置前原件）。**注意**：session 3 以"渲染进程重载"收尾，进程被关掉后该孤儿 overlay 已随进程消失；下次启动会正常建窗并把诊断位复位。
 - 截图清单（`%TEMP%\pet-e2e2\`，本轮新增 12 张）：`Q15-01-icon-panel-mumu.png`、`Q15-02-panel-render-clip.png`、`Q15-03-drag-nopanel-50.png`、`Q15-05-settings-preset-diag.png`、`Q15-06-settings-after-restart.png`、`Q15-07-pet-ok.png`、`Q15-08-pet-cooling.png`、`Q15-09-play-ok.png`、`Q15-10-feed-ok.png`、`Q15-11-feed-disabled-panel.png`、`Q15-12-disabled-panel-clean.png`、`Q15-13-settings-reverse-retained.png`；本轮日志 `dev3.log`/`dev3b.log`/`dev3c.log`(+`.err`)、原始断言 `out-q15-*.txt`、语料 `q15-corpus.txt`、新脚本 `scripts/q15-*.mjs`、`scripts/cap.ps1`、`scripts/q15-drag.ps1`（旧文件均未删）。
+
+---
+
+## 卡 18 后复验（10 秒随机表演 + 图标白线透明底）
+
+> 任务卡：`tasks.md` §9.2（卡 18 落地后的实机复验）。范围：**① N13 随机表演观感、② 打盹期间安静、③ N14 图标白线/透明底/悬浮浮层、④ 回归（面板开合 / 拖动 / 文案 / 设置页与 toggle）**。
+> 本代理只读实现代码、只写本证据文件（及其 `docs/spec/…` 同源副本）；截图/脚本/日志全部落在 `%TEMP%\pet-e2e2\`（沿用，未删旧文件）。
+> 口径：截图名相对 `%TEMP%\pet-e2e2\`；"渲染层截图" = 经 CDP `Page.captureScreenshot` 对 overlay 顶层 target 做 clip（全程不开 DevTools）。
+
+### 0. 环境
+
+| 项 | 值 |
+| --- | --- |
+| 启动前现场 | 9333/5173 无监听、`Get-Process electron` = 0；已安装 obox 未在跑；无关 node（22:02 起的 DSH web 服务）未动 |
+| 宿主动作 | 三次会话，同一参数 `npm run dev -- -- --remote-debugging-port=9333 --debug-extension pet@C:\Users\chenzhi\Documents\workspace\web\obox\extensions\pet` |
+| session A（`dev4.log`） | 14:13:37 起 —— N13 被动观察 180s、逐轮追踪 120s、rAF/帧停留 32s、N14、面板开合、玩耍/洗澡文案；14:37:0x 关闭 |
+| session B（`dev5.log`） | 14:37:35 起 —— 拖动尝试（被锁屏挡住）、设置页、toggle、摸头文案、打盹闸门、桥级拖动/钳位；14:43:5x 关闭 |
+| session C（`dev6.log`） | 14:44 起 —— 重启回位校验；14:45:5x 关闭 |
+| 参数生效证据 | 每会话首段均见 `[debug] 调试扩展 1 个: pet@…` 与 `[overlay] 已创建: pet/pet.overlay 220x460 anchor=bottom-right margin=24 transparent=true alwaysOnTop=true skipTaskbar=true @(2316,908) 默认鼠标穿透=true` |
+| 构建新鲜度 | `dist/index-DZ8id3ZK.js`(+`index-DRxxmL2O.css`) 构建于 **14:10:34** > 最后一次源码改动 **14:10:22**（`app/App.vue`）⇒ 本轮跑的就是卡 18 产物（产物文件名与卡 17 不同，确已重建） |
+| DevTools | **全程未开** |
+| 显示器 | 单屏 2560×1440，workArea=(0,0,2560,1392)，dpr=1 |
+| CDP targets | 主窗 `http://localhost:5173/`；overlay page（`?obox-window=overlay&extId=pet&overlayId=pet.overlay&appId=pet.overlay&url=app%3A%2F%2Fdebug%2F…`）；iframe `app://debug/pet/dist/index.html`（宠物页真实运行处，iframe 偏移 (0,0)、尺寸 220×460） |
+| MuMu | 设备窗体**已最小化**（rect -32000,-32000）；屏上只剩 `MuMuNxMain`「MuMu模拟器」 (1113,621)-(1973,1201)。本轮**没有**依赖 OS 命中的验收项（唯一一次真鼠标拖动被锁屏挡住，见 §4②），故 MuMu **未影响任何结论** |
+| **锁屏（关键环境事实）** | 约 **14:38 起** `Get-Process LogonUI` = 1、`WindowFromPoint(2250,1050)` 返回 `Windows.UI.Core.CoreWindow`（标题「Windows 默认锁屏界面」）；期间 `CopyFromScreen` 取到的是锁屏壁纸（`Q18-09-screenstate.png`）。⇒ **OS 级真实鼠标/拖动不可用**（§4② 因此只做替代口径）。另：锁屏期间 electron 全进程 CPU 实测 **0.0 ms/10s**（渲染被挂起），故 toggle 的 CPU 项本轮无效（§4④） |
+| **外部并发改动（HMR）** | **14:25:56** 有 11 个宿主 `src/` 文件被写入（另一个代理在改/提交宿主，现宿主 HEAD 已到 `f41d561`、工作区 clean）⇒ Vite 对宿主渲染进程做热更新/重载 ⇒ 运行中的 overlay 被"孤儿化"：日志出现 `[overlay] 创建被拒（pet）：overlay id 已存在…`、宠物页打印 `订阅失败…扩展未注册消息处理器` 并回落到首帧占位（`成长 0🐟 3｜🫧 3` + 「正在连接宠物状态…」）。后果：① 一个采样脚本在目标被替换后挂住（已 kill 重跑）；② 一次互动采样作废。**非产品缺陷**（卡 17 已归因的"渲染进程重载"手法产物）；副作用上它**偶发复现了卡 17 的 D-1 反向场景**——诊断位/状态栏又显示出「宠物窗体创建失败：overlay id 已存在（重复创建）…」，下一次成功启动（session B）后自动复位为 `""`/「宠物」，与卡 17 结论一致 |
+
+### 1. N13 每 10 秒随机表演 —— **节奏与抽取通过，但发现实现级缺陷 D-1（见 §5）**
+
+- 方法：让宠物独自待着（指针停在 (300,300) 远离窗体），**页内 60ms 采样"实际渲染行" + 行变化时经消息桥取入口权威 `anim.status`**（`q18-perf-watch.mjs` / `q18-perf-trace.mjs`），另用 `q18-raf.mjs` 采 rAF 频率与逐帧停留。
+- **节奏（入口侧，1s 采样分辨率；`out-q18-trace-summary.txt`）**：120s 内 **12 轮**，起点间隔逐条为 `10.00 / 9.99 / 9.99 / 10.02 / 9.99 / 10.00 / 10.17 / 9.84 / 10.15 / 10.14 / 9.70` 秒 ⇒ **严格每 10 秒一轮**（与 `RANDOM_PERF_EVERY_SEC=10` 一致）。
+- **抽取覆盖（两轮观察合计 ≥22 轮）**：**7 项全部自然抽到** —— `eating 3 / petted 2 / bathing 2 / run-right 2 / playing 1 / run-left 1 / trot 1`（120s 窗口，另加 180s 窗口同集）⇒ 随机集确实是那 7 项，`hungry/dirty/sad/sleep` **一次都没出现**（与 design D-14 一致）✓
+- **不耗道具 / 不改数值 / 不弹气泡**：随机表演期间 `items`/`vitals`/`growth` 只有 tick 的自然衰减、无跳变；采样到的 `bubble` 恒为 `null`（表演不弹气泡）✓
+- **引擎健康度**：`q18-raf.mjs` 实测 rAF **1922 ticks / 32054ms = 60.0 Hz**（无节流），idle 轨逐帧停留稳定 **400ms**（与 pet.json 一致）⇒ 下面测到的时长不是被 rAF 节流"拉长"的。
+- **渲染停留（`q18-trace.jsonl` → DOM 行切段）**：
+  - `trot`(row7) **2410ms**、`run-left`(row2) **3210ms**、`run-right`(row1) **3210 / 3190ms** ⇒ **会回落**到呼吸 idle，但比规格（1.5s / 1.8s）长 0.9–1.4s（其中 `TRANSIENT_SLACK_MS`=500ms 是设计内的兜底余量，其余为回落路径本身的延迟）。
+  - `eating`(row4) **4980 / 14990ms**、`bathing|petted`(row3) **4980 / 24980ms**、`playing`(row7) **10000ms** ⇒ **播完不回落**：页面一直渲染该轨直到入口下一次状态推送（下一次随机表演 10s 或 15s tick），连续几轮抽到同轨时会连成一片（实测最长 **24.98s** 连续渲染 row3）。
+- **原地侧向跑是否别扭（观感判断，附 20 张帧）**：`Q18-run-left-f01..f10.png`、`Q18-run-right-f01..f10.png`（416×444、2×）显示宠物以**侧面朝向**（左/右）做 8 帧行走循环，腿部交替、**身体零位移**（该窗口 `dev4.log` 内 **0 行** `setPosition`，与"只原地播帧"一致）。**我的判断：动作本身画得干净、不丑，但它是"位移动作零位移播放" ⇒ 读起来是原地踏步/太空步；真正让它显得别扭的是 D-1——它把 1.8s 的一轮拖成 3.2s，越长越像"走了半天没动"。** 结论与建议见 §6。
+- 截图：`Q18-run-left-f01..f10.png`、`Q18-run-right-f01..f10.png`、`Q18-04-idle-contrast.png`（同窗体全幅）。
+
+### 2. 打盹期间安静 —— **通过（时钟推进法，父代理明确许可）**
+
+- 方法（`q18-sleep-test.mjs`）：入口跑在主窗渲染进程，把主窗的 `Date.now` **前推 11 分钟**（`window.__q18RealNow` 保存原函数、用完立即还原），使 `resolveStatus` 的第 3 条（`now-lastInteractAt ≥ 10min`）成立；**不碰 `state.json`、不碰任何实现代码**。
+- 原始数据（`out-q18-sleep.txt` / `q18-sleep-test.json`）：
+  - **基准（推进前，32s）**：3 次表演 —— `run-right@1.8s`、`eating@10.8s`、`run-left@21.6s`，各自约 1.8s 后回 idle。
+  - **前推后（100s）**：入口状态序列**只有一条** `{t:0, status:"sleep"}`（采样起点的 sleep 本身，**不是**一次表演）⇒ **100 秒内没有任何 idle→表演 的转换，即随机表演触发 0 次**；同时气泡出现 **`打盹中（Zzz）`**；末次读数 `{"status":"sleep","row":0}`。
+  - **还原时钟后（32s）**：表演恢复 2 次（`run-right@18.0s`、`run-left@28.9s`）⇒ 证明那 100 秒里 10s 定时器**一直在跑**，是**闸门**在拦，不是定时器停摆。
+- 口径注：本机 14:38 起锁屏、且 rAF 在锁屏期被挂起，故"帧时长 ×1.5 慢放"这一项**本轮未复现**（`resolveStatus='sleep'` 已由上面的状态序列证实；慢放与 Zzz 气泡的实现见卡 16 的 `out-frames-sleep.json` 与 `W1b-bubble-18.png`）。
+- 结论：**打盹期间确实安静**——10s 定时器照常到点，但 `onRandomPerf` 的 `status === 'sleep'` 闸门每次都拦下，"睡着了还自己表演"不会发生 ✓
+
+### 3. N14 图标（透明底 / 白线 / 悬浮浮层 / 焦点环）—— **通过**
+
+- 方法：`q18-icon.mjs`，双口径 —— ① 真实 CDP 指针移动（测"即时"延迟）；② `CSS.forcePseudoState`（确定性交叉验证，抗外部鼠标干扰）；另用真实 `Tab` 走键盘路径。
+- **静态计算样式（面板打开、无悬浮）**：三枚 `button.act` 全部 `background-color: rgba(0, 0, 0, 0)`、`background-image: none`（**无渐变底**）、`border-top-color: rgba(0, 0, 0, 0)`（1px 透明边框槽）、`svg.icon` 全部 **`stroke: rgb(255, 255, 255)`**、`fill: none`、`stroke-width: 1.6px`、`22px×22px`；`aria-label` 逐字 = 喂食 / 洗澡 / 玩耍，**原生 `title` 已去除**（`titleAttr: null`，无双提示）。
+- **`.tip` 浮层**（`.panel .tip`）：三枚各一条，文本逐字 喂食 / 洗澡 / 玩耍；默认 `visibility:hidden` + `opacity:0`；`transition-duration: **0s**`（零过渡 ⇒ 真"即时"）；`background: rgba(15,23,42,.92)`、白色字、`border-radius: 6px`、`pointer-events: none`、`aria-hidden="true"`。
+- **真实指针悬浮（逐枚实测）**：`hidden/0 → visible/1` 耗时 **17ms**（≈1 帧，含 CDP 往返）；`tipAboveBtn: true`、tip 与按钮**中心偏差 0px**、间隙 **5px**（tip 底 204 ↔ 按钮顶 209）；悬浮态按钮 `background: rgba(255,255,255,0.08)` + `border: rgba(255,255,255,0.28)`（极淡白叠加 + 白描边高亮）✓
+- **禁用态**：`fish=0` 的「喂食」`aria-disabled="true"`、`opacity:0.45`，悬浮时**不加白底/白边**（`:not([aria-disabled='true']):hover` 生效），但**它的 `.tip` 照常显示**「喂食」✓（与任务卡负向自检一致）
+- **焦点环**：`:focus-visible` ⇒ `box-shadow: rgb(255, 255, 255) 0px 0px 0px 2px`（**白色 2px**）；`forcePseudoState` 与真实 `Tab` 两条路径都逐字命中；键盘聚焦时对应 `.tip` 同时可见 ✓
+- 截图：`Q18-01-panel-whiteicons.png`（面板 + 三枚白线图标）、`Q18-02-tip-feed/bathe/play.png`（悬浮浮层）、`Q18-03-focus-ring.png`（白色焦点环）。
+- **可读性结论**：白色 1.6px 线条在 `rgba(15,23,42,.92)` 深色玻璃面板上对比清晰、三枚图形（小鱼 / 泡泡 / 球）均可辨识；禁用那枚靠透明度变淡而不是变色，仍看得出是什么动作。
+- **观察项（非缺陷，见 §5）**：① 鼠标停在其中一枚上、同时用键盘把焦点移到另一枚时，**两条 `.tip` 会同时显示**（`Q18-03-focus-ring.png` 里「洗澡」+「玩耍」同时可见）；② 关闭按钮 ✕ 仍是旧的青色焦点环 `rgba(56, 189, 248, 0.85)`，与三枚图标的白色环不一致（卡 18 只改了 `.act`）。
+
+### 4. 回归四项
+
+**① 面板开合（进宠物显示 / 移到面板上保持 / 完全离开立刻关闭）—— 通过**（`q18-panel.mjs`、`out-q18-panel.txt`）
+
+- 指针进精灵 ⇒ `hasPanel=true`；指针移到**面板上**（等级行 (40,166)）⇒ **8/8 连续采样（约 720ms）全部 `true`**（面板自己在命中矩形里 ⇒ 保持显示）✓
+- 完全离开（移到 (2,2)）⇒ **判定延迟 `judgeLatency_ms = 2.2ms`**（从页面收到的第一条 pointermove 事件到 `.panel-fade-leave-active` 的 `pointer-events:none` 生效 = 判定已翻转），DOM 节点移除在其后 **17.2ms** ⇒ **没有 120ms 以上的判定延迟**；`panelOpen` 是纯同步 computed、`hitBoxes()` 只看它，过渡只作用在视觉属性上 ✓
+- 回到精灵 ⇒ 面板恢复 `true` ✓
+- 口径注：本机 `prefers-reduced-motion` 使淡出被 `transition: none` 关掉（DOM 移除只用 17ms），因此「淡出 120ms 内不吃指针」这条加固**在本机窗口期内不可观测**（代码在 `App.vue` 的 `.panel-fade-leave-active { pointer-events: none }`，已读码确认）。
+
+**② 拖动（跟手 / 拖动中面板不弹 / 松手恢复 / 钳位 / 重启回位）—— 部分通过；"跟手"半项被锁屏挡住**
+
+- **被挡住的部分**：14:37:57 用 OS 真鼠标脚本从宠物身上起拖，`pre-hit class at (2250,1050) = Windows.UI.Core.CoreWindow`（锁屏界面）⇒ 鼠标事件根本没进 overlay，`dev5.log` 未新增 `setPosition`、`state.json` 位置不变。截图 `Q18-08-drag-40.png` 留证（画面是锁屏）。**"跟手/顺滑手感"本轮未复验**（卡 17 已用真鼠标验过 101 行 setPosition 逐像素吻合；卡 18 未改该路径的页面侧接线）。
+- **替代口径 A（页面侧：拖动中面板不弹、松手恢复）—— 通过**（`out-q18-dragtest.txt`）：`panelBefore=true` ⇒ CDP 在精灵上按下后 **5/5 采样全部 `false`**（press 期间 `dragging=true` ⇒ `panelShouldOpen` 为假）⇒ 同点抬起后 **`true`**（松手即恢复）✓ 与卡 17 的真鼠标结论一致。
+- **替代口径 B（入口侧：桥级 `pet.drag` start/move/end）—— 通过**：
+  - 起点自记位 (2148,688) 收到 `move{dx:-1400,dy:-350}` ⇒ 回包 `position:{x:748,y:338}` = 逐像素精确累加 ✓；`end` ⇒ 落盘 `state.json position={748,338}`（强制落盘）✓
+  - 超大增量 ⇒ `dev5.log` `[overlay] setPosition: pet/pet.overlay 请求(100747,100337) 钳制后(2340,932)`，(2340,932) = workArea 极限 (2560-220, 1392-460) 逐像素吻合 ✓
+  - 负向：`{phase:'nope'}` ⇒ `未知拖动阶段: nope`；`{dx:'x'}` ⇒ `拖动增量非法：dx/dy 必须是有限数字`（都不移动）✓
+  - **重启回位**：落到位 (640,332) ⇒ session C 启动日志 `[overlay] setPosition: pet/pet.overlay → (640,332)` ✓
+
+**③ 文案抽测 —— 通过（4 句逐字 + 正则 0 命中）**
+
+| 情形 | 实际气泡逐字 | 证据 |
+| --- | --- | --- |
+| 摸头成功 | `咕噜咕噜～被摸摸好舒服！` | `out-q18-pet.txt`、`Q18-06-pet-ok.png` |
+| 摸头冷却 | `摸过头啦，让鲸鱼娘歇口气～` | 同一次会话内连点两次、`Q18-07-pet-cooling.png` |
+| 玩耍成功 | `玩得好开心！` | `out-q18-interact.txt`、`Q18-05-play-ok.png`（道具不变 `🐟0｜🫧2`） |
+| 洗澡成功 | `泡泡好舒服～洗干净啦！` | 同上、`Q18-05-bathe-ok.png`（`🫧` 2→1） |
+
+- 面板 + 气泡 + 三条 `.tip` 的全文本复核：`/\d+\s*(分钟|秒|小时)/` **0 命中**、`/[+-]\d+/` **0 命中**、`/\d+\s*\/\s*100/` **0 命中**（面板文本实测 `幼鲸· 成长 4🐟 0｜🫧 1喂食洗澡玩耍 ✕`）✓
+- 口径注（与 D-1 相关）：点「玩耍」后 1.7s，气泡仍是「玩得好开心！」而精灵已被随机表演抢占到 `eating` 轨（`out-q18-interact.txt` 的 rowTimeline）——**气泡与动画短暂不一致**，根因同 §1 的 D-1。
+
+**④ 设置页与 toggle —— 结构通过；CPU 项在锁屏下无效**
+
+- 三行 `[role=progressbar]` + `aria-valuemax=100` + 右侧 `NN/100`（`68/100`、`98/100`、`96/100`）+ 各行 `desc: null`（无 description）+ 诊断行 `（无）` + boolean「显示宠物」`checked:true`（`out-q18-settings-rows.txt`、`Q18-10-settings.png`）
+- toggle 关 ⇒ targets 只剩主窗（overlay page 与 iframe **都消失**）；开 ⇒ targets 回归 + `[overlay] 已销毁` → `已创建` → `setPosition → (2148,688)`（存档位）+ 三行数值**连续不重置**（关前 68/98/96 → 开后 68/97/96，清洁度只按衰减走）✓
+- **CPU 项无效**：锁屏期间 electron 全进程 `TotalProcessorTime` 10s 差 **ON 0.0ms / OFF 0.0ms**（进程 7→5）——渲染被系统挂起，数值不具区分度；CPU 判据沿用卡 17 实测的 **296.9 → 46.9 ms/10s**（未锁屏），本卡未改动画/渲染路径。
+
+### 5. 缺陷清单（只记录不修）
+
+- **D-1（卡 18，建议按"中"处理）随机表演抽到 `eating`/`bathing`/`petted`/`playing` 时不回落到呼吸 idle**。
+  - 现象：这 4 项播满一轮（1.4–1.6s）后**画面停在该轨**，直到入口下一次状态推送（下一次随机表演 10s 或 15s tick）才换轨/回 idle；连续几轮抽到同轨会连成一片（实测 row3 连续 **24.98s**、row4 **14.99s**）。而 `trot`/`run-left`/`run-right` 会回落（2.41s / 3.21s）。
+  - 复现：起 dev 宿主 → 让宠物独处 → `q18-perf-trace.mjs` 采 120s：入口状态每 10s 换一条、DOM 行却常常不经过 0（`out-q18-trace-summary.txt` 的"DOM 行切段"章节）。
+  - 根因（已读码定位，非猜测）：`app/App.vue` 的 `entryStatus` 只在 `isSelfBurst(status)`（= `trot`/`run-left`/`run-right`）且 `burstLatched` 时折成 `idle`；随机表演与真实互动**共用入口的同一个 `transient` 字段**，而 4 项互动轨（eating/bathing/playing/petted）与"用户刚点的喂食/洗澡/玩耍/摸头"**状态字符串完全相同**，页面无法区分来源 ⇒ `decideAnimation` 在本地一轮播完后仍按入口的 `animStatus` 渲染该轨（`STATUS_PRIORITY.eating=9 > idle=1`），直到下一份状态到达。
+  - 影响面：① 观感上"每 10 秒表演一次、1.4–1.8s 后回落"这一条**在真实窗口不成立**（约 4/7 的轮次会拖长到 10–25s）；② 连点互动时**气泡与动画会短暂不一致**（气泡 2.6s，动画已被随机表演抢走）；③ 该行为**对真实互动同样存在**（点喂食后若 15s 内没有 tick，进食姿态会一直挂着）——卡 18 只是把它变得高频可见；是否卡 ≤15 就已有，本卡不作归因。
+  - 落点建议：让页面能区分"入口自发的 4 项表演"与"用户点出来的互动"（例如入口在 view 里加一个 `anim.selfBurst: true` 标记，或让随机表演用与互动不同的状态 key），随后把 `entryStatus` 的折 idle 条件从 `isSelfBurst` 扩展到"入口标记为自发的一轮"。**本卡只记录不修**。
+- **观察项 O-1（非缺陷）**：鼠标停在某一枚图标上、同时键盘把焦点移到另一枚时，**两条 `.tip` 同时显示**（`Q18-03-focus-ring.png`）。
+- **观察项 O-2（非缺陷）**：✕ 关闭按钮的焦点环仍是青色 `rgba(56,189,248,.85)`，与三枚图标的白色 2px 环**风格不一致**（卡 18 只改了 `.act`；若属有意保留可忽略）。
+- **观察项 O-3（非缺陷）**：自发表演轨（trot / run-left / run-right）的**渲染停留高于规格**：实测 2.41s / 3.21s vs 规格 1.5s / 1.8s（含设计内的 `TRANSIENT_SLACK_MS=500ms` 兜底余量，其余为回落路径延迟）。若非刻意，可随 D-1 一并收敛。
+- **观察项 O-4（环境，非缺陷）**：14:38 起机器锁屏（`LogonUI=1`）⇒ 本轮"真鼠标拖动/跟手"与 toggle 的 CPU 项不可测；14:25:56 另一代理改宿主 11 个文件触发 Vite HMR 重载 ⇒ 运行中的 overlay 被孤儿化（`扩展未注册消息处理器` + 首帧占位），并使一个采样脚本挂住。
+- **上一轮遗留 O-1（卡 17）**：Tab 经 ✕→精灵时面板闪关一次（iframe `window.blur/focus` 触发 `onWindowBlur`）——本轮未复测，维持"交 check 步甄别"。
+
+### 6. `run-left` / `run-right` 保留还是删除 —— **建议保留**（附一个前置条件）
+
+- **理由**
+  1. 动作本身没问题：20 帧实地采样显示侧面行走循环画得干净、腿部交替自然、**零位移**（该窗口 `setPosition` 0 行），没有穿模/跳帧/越界。
+  2. "位移动作原地播放"在本产品里**已经是既成惯例且被用户接受**：`trot`(row7 running) 同样是行走循环原地播，卡 15 起就在，用户裁定 Q10/Q14 明确要了"原地小跑"；侧跑只是把同一件事换成**侧面朝向**。
+  3. 用户裁定 Q16 的原文就把这两条列进了随机集合；删除属于**推翻用户刚下的裁定**，应由用户定夺而不是由观感单方面否决。
+  4. 我实测到"别扭"的那部分**有独立成因**：D-1 把 1.8s 的一轮拖成 **3.21s**，越长越像"走半天没动"。**先修 D-1（1.8s 一轮、播完即回呼吸 idle）再复看**，我判断观感会明显改善。
+- **前置条件 / 何时改判为删除**：若修完 D-1（恢复 1.8s + 立即回落）后用户仍觉得"侧面原地走"突兀，那就应删——因为届时不别扭的理由只剩"另一个版本"了。删除成本确实很小（`RANDOM_PERF_SET` 去掉两项 + `STATUS_TRACK`/`STATUS_LABEL`/`STATUS_PRIORITY` 与 `app/lib/anim.ts` 同名表各去两项 + 规格删两条 scenario），可作为 **v1.0.1** 的可逆小改。
+- 一句话给用户：**"侧跑先留着，但先把『抽到吃饭/洗澡/摸头/玩耍时播完不回落到呼吸』这个 bug 修掉再看"**。
+
+### 7. 需用户物理确认清单（图标白线 + 10 秒随机表演版，约 60–70 秒）
+
+> 前置：dev 宿主按任务卡命令在跑、宠物可见。以下结论不能由注入输入代替。**建议先关掉 MuMu 窗口**（上轮它覆盖工作区会吃掉穿透落点）。本轮**新增**第 2、5 两条与卡 18 直接相关的观察点。
+
+1. **0–15s 图标观感（N14 重点）**：鼠标停在宠物上 ⇒ 面板淡入，应看到**三枚没有底色的白色线条图标**（小鱼 / 泡泡 / 球）直接画在深色玻璃面板上；鼠标移到任一枚上 ⇒ **立刻**（不是等 1 秒）在图标**正上方**弹出中文名（喂食/洗澡/玩耍）；面板上不应出现系统自带的原生提示（原生 `title` 已去掉）。
+2. **15–30s 十秒随机表演（本次最重要的人工判据）**：让宠物自己待着（手离开宠物与面板）60–90 秒 ⇒ 应**大约每 10 秒**出现一次"表演"（进食/洗澡/摸头/玩耍/原地小跑/向左小跑/向右小跑 之一），每次约 1.5–1.8 秒，**并且应回到平静的呼吸待机**。请特别留意：**抽到"向左/向右小跑"（侧面朝向原地迈步）时是否觉得别扭**（这是 §6 的判据）。
+3. **30–45s 图标可点 + 禁用态**：点喂食/洗澡/玩耍 ⇒ 对应动画 + 气泡（呜哇！/泡泡好舒服～/玩得好开心！）；道具为 0 时对应图标变淡且点不动，但鼠标移上去**仍应弹出中文名**，Tab 也能停上去（有白色焦点环）。
+4. **45–55s 面板开合手感**：悬停出面板 ⇒ 把鼠标**移到面板上**（比如"成长"那一行）⇒ 面板应保持；把鼠标**完全移开** ⇒ 面板应**立刻**开始淡出（不应有"卡一下"的延迟），并且淡出中的面板不该吃掉你的点击。
+5. **55–70s 打盹期安静**：手离开宠物 **10 分钟以上**（可先去做别的事）⇒ 应出现「打盹中（Zzz）」与更慢的呼吸；**打盹期间不应再自己表演**（这是本轮修好后要人工确认的反向判据）。回来后随便点点它 ⇒ 应立刻"醒"过来并恢复表演。
+6. **可选**：把一侧道具用到 0，再往屏幕其他位置点几下 —— 面板淡出期间不应误点到幽灵按钮。
+
+### 8. 未验证项与原因
+
+- **真鼠标"跟手/手感"**：机器 14:38 起锁屏（`LogonUI=1`），OS 输入不可用；已用"页面侧按下/抬起 + 桥级 drag"覆盖「拖动中面板不弹 / 松手恢复 / 增量累加 / 钳位 / 落盘 / 重启回位」，**只缺"跟手顺滑"这一项主观项**（卡 17 真鼠标实测 101 行 setPosition 逐像素吻合，卡 18 未改该路径）。
+- **toggle 的 CPU 回落绝对值**：锁屏导致渲染挂起，ON/OFF 都是 0.0 ms/10s；沿用卡 17 的 296.9→46.9 ms/10s。
+- **打盹的"帧时长 ×1.5 慢放"**：锁屏期 rAF 被挂起、无法测逐帧停留；`resolveStatus='sleep'` 与「打盹中（Zzz）」已实测，慢放本身见卡 16 的 `out-frames-sleep.json`。
+- **`prefers-reduced-motion` 关闭淡出时的"淡出期不吃指针"**：本机被系统 reduced-motion 关掉了过渡，窗口期不可观测（代码已读码确认）。
+- **多显示器 / 非主显示器锚定 / dpi≠1**：本机单屏 dpr=1。
+- **`run-left/right` 的人工观感**：只能给本代理的帧级判断（§6），最终"别扭与否"须用户物理确认（§7 第 2 条）。
+- **D-1 是否卡 ≤15 就存在**：本卡只做卡 18 后的现状复验，不对历史归因。
+
+### 9. 收尾确认
+
+- **dev 实例已全部关闭**：14:46 核实 `Get-Process electron` = **0**、9333/5173 **无 LISTEN**（只剩 TIME_WAIT）；node 只剩 22:02 起的 DSH web 服务与其子进程（**未杀**）。
+- **零提交、无越界写入**：本代理**未执行任何 `git add/commit/push`**。仓库内被本代理写的文件只有两份同源的证据副本（`openspec/changes/archive/2026-10-16-pet-desktop-companion/notes/evidence/real-window-v2.md` 与 `docs/spec/UID-20261014232746-桌面宠物属性/notes/evidence/real-window-v2.md`，二者提交 v1.0.0 时字节一致、互为副本）；**未改任何实现代码/规格/任务卡**。写入前扩展仓 `git status` clean（HEAD `95ecc57`），写入后应只见这两个 modified；宿主仓（HEAD `f41d561`）本轮**未被本代理改动**。
+- 存档处置：`state.json` 留在 session C 结束态（`position:(640,332)`、`fish:1`、`bubble:2`、三属性约 53/95/94）；本轮备份 `%TEMP%\pet-e2e2\state-backup\state.json.q18pre`（本轮开始前）。
+- 截图清单（`%TEMP%\pet-e2e2\`，本轮新增 35 张）：`Q18-00-screencheck.png`、`Q18-01-panel-whiteicons.png`、`Q18-02-tip-feed.png`、`Q18-02-tip-bathe.png`、`Q18-02-tip-play.png`、`Q18-03-focus-ring.png`、`Q18-04-idle-contrast.png`、`Q18-05-play-ok.png`、`Q18-05-bathe-ok.png`、`Q18-06-pet-ok.png`、`Q18-07-pet-cooling.png`、`Q18-08-drag-40.png`（锁屏挡拖动的留证）、`Q18-09-screenstate.png`（锁屏期取色）、`Q18-10-settings.png`、`Q18-run-left-f01..f10.png`、`Q18-run-right-f01..f10.png`；日志 `dev4.log`/`dev5.log`/`dev6.log`(+`.err`)、原始断言 `out-q18-*.txt`、逐轮数据 `q18-trace.jsonl`/`q18-trace-rounds.json`/`q18-watch-a.jsonl`/`q18-sleep-test.json`、新脚本 `scripts/q18-*.mjs`（旧文件均未删）。

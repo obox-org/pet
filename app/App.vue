@@ -13,8 +13,9 @@ import {
 import type { Bridge } from './lib/bridge'
 import { DEFAULT_CELL_H, DEFAULT_CELL_W, fetchMetaJson, loadImageElement, normalizeMeta } from './lib/sprites'
 import type { SpriteMeta } from './lib/sprites'
-import { KIND_TO_STATUS, RANDOM_PERF_PERIOD_MS, decideAnimation, isSelfBurst, isTransient } from './lib/anim'
+import { KIND_TO_STATUS, RANDOM_PERF_PERIOD_MS, decideAnimation, isTransient, knownStatus } from './lib/anim'
 import type { PetStatus } from './lib/anim'
+import { burstFallbackMs, entryTrackOf } from './lib/burst'
 import { panelShouldOpen } from './lib/panel'
 import { BUBBLE_MS, DEFAULT_STATE, TEXT, normalizeState, num } from './lib/state'
 import type { PetStateView } from './lib/state'
@@ -34,16 +35,8 @@ const PANEL_GAP = 6
 const HIT_RECT_TTL_MS = 200
 /** 订阅失败后的退避：入口未激活时会立刻回"未注册消息处理器"，不退避会把桥刷爆 */
 const RETRY_BACKOFF_MS = 2000
-/** 瞬时互动的兜底回落余量：页面不可见时 rAF 停摆，onCycleEnd 不会来 */
-const TRANSIENT_SLACK_MS = 500
 /** 状态气泡的展示上限：入口可能给一个很远的 until，页面不许因此把气泡挂死 */
 const STATE_BUBBLE_MAX_MS = BUBBLE_MS * 4
-/**
- * "计划还没算出来"时给入口自发表演用的兜底轮长（ms）。
- * 取 2000 = 全部表演轨里最长的一轮（`run-left`/`run-right` 8 帧 × 225ms = 1800ms）+ 余量：
- * 兜底值**必须不小于**真实轮长，否则定时器会提前把动画掐掉（宁可晚一点回落）。
- */
-const BURST_FALLBACK_MS = 2000
 
 type InteractKind = 'feed' | 'bathe' | 'play' | 'pet'
 
@@ -82,11 +75,23 @@ const frameIndex = ref(0)
 const reducedMotion = ref(false)
 const transient = shallowRef<PetStatus | null>(null)
 /**
+ * 本地这一轮瞬时动画的**来源**（卡 19 · 热修 D-1）：`true` = 入口自发的随机表演（视图的 `anim.self`），
+ * `false` = 用户点出来的真实互动（`interact()` 或页面兜底起的轮次）。与 `transient` 同生命周期：
+ * 起一轮时与它一起写、播完/被抢占时与它一起清。
+ *
+ * **为什么需要它**：入口的随机集里有 `eating`/`bathing`/`petted`/`playing` 四项与真实互动
+ * 同名同轨，`transient.value` 这个字符串压根分不出"这一轮是谁写的"；而"播完要不要折回呼吸 idle"
+ * 恰恰取决于它（自发表演要折——入口的 `transient` 到期不推送，不折就一直渲染；互动不能折）。
+ * 非响应式：它只参与"播完时的收尾判定"，不参与渲染（渲染看 `transient` 与 `burstLatched`）。
+ */
+let transientIsSelf = false
+/**
  * 入口自发"表演型"动画的**本地锁存**（design D-14 / 用户裁定 Q16：每 10 秒随机一轮，播完回落）。
  *
- * 入口报 `trot` / `run-left` / `run-right` 时会一直报到下一次状态推送（最长一个长轮询周期），
- * 而一轮只有 1.4–1.8s；不锁存的话，本地播完一轮后 `decideAnimation` 又读到同一条 ⇒ 原地跑个不停。
+ * 入口报一轮自发表演时会一直报到下一次状态推送（最长一个长轮询周期），而一轮只有 1.4–1.8s；
+ * 不锁存的话，本地播完一轮后 `decideAnimation` 又读到同一条 ⇒ 原地跑个不停。
  * 播完置 true（此后按 idle 渲染），入口推来新状态时由 `syncBurst` 复位并重播（见其注释）。
+ * 判据是入口给的 `anim.self`（**不是**状态字符串——见 app/lib/burst.ts 的 `entryTrackOf`）。
  */
 const burstLatched = ref(false)
 /**
@@ -162,16 +167,20 @@ const DRAG_MOVE_THRESHOLD_PX = 3
 
 // ---- 派生：当前该播哪一轨 ----
 /**
- * 送进 `decideAnimation` 的入口状态/行号：入口自发表演播完一轮（锁存）后双双降级成 idle。
+ * 送进 `decideAnimation` 的入口状态/行号：入口**自发**的随机表演播完一轮（本地锁存）后
+ * 双双降级成 idle。
+ *
+ * 判据是入口给的**来源标记 `anim.self`**（卡 19 · 热修 D-1），不是状态字符串：
+ * 随机集的 `eating`/`bathing`/`petted`/`playing` 与真实互动同名同轨，字符串无从区分
+ * （卡 18 的 `isSelfBurst` 只认三条同构轨，所以那四项播完永远不回落——D-1 实机停留
+ * 5.0/10.0/15.0s、连成一片 24.98s）。真实互动 `self === false` 一律不折，照旧渲染完整一轮。
  * row 也必须一起降级——否则 `decideAnimation` 的"入口没给 status 就按 row 渲染"兜底分支
  * 会拿着 row 2/1/7 继续播侧跑/原地跑轨（app/lib/anim.ts 的 planForRow 路径）。
+ * 判定本身是纯函数（app/lib/burst.ts 的 `entryTrackOf`），可被 `node --test` 直接跑。
  */
-const entryStatus = computed(() =>
-  isSelfBurst(display.value.anim.status) && burstLatched.value ? 'idle' : display.value.anim.status
-)
-const entryRow = computed(() =>
-  isSelfBurst(display.value.anim.status) && burstLatched.value ? -1 : display.value.anim.row
-)
+const entryTrack = computed(() => entryTrackOf(display.value.anim, burstLatched.value))
+const entryStatus = computed(() => entryTrack.value.status)
+const entryRow = computed(() => entryTrack.value.row)
 
 const plan = computed(() => {
   const m = meta.value
@@ -257,13 +266,15 @@ function onFrame(index: number): void {
 
 function onCycleEnd(): void {
   // 瞬时互动播完一轮就回落到属性判定（specs/pet-sprites 的"播完回落"scenario）
-  const finished = transient.value
-  if (!finished) return
+  if (!transient.value) return
+  // 先记下这一轮的来源再清：自发表演播完 ⇒ 锁存（此后忽略入口仍在报的同一条）；
+  // 真实互动播完 ⇒ 什么都不做，交回状态驱动（app/lib/burst.ts 的 entryTrackOf 按 anim.self 判定）
+  const wasSelf = transientIsSelf
   transient.value = null
+  transientIsSelf = false
   clearTimer(transientTimer)
   transientTimer = 0
-  // 入口自发的表演播完一轮 ⇒ 锁存，此后忽略入口仍在报的同一条（见 burstLatched 注释）
-  if (isSelfBurst(finished)) latchBurst()
+  if (wasSelf) latchBurst()
 }
 
 /** 锁住"这一轮入口自发的表演已经播完"，并挂上看门狗（见 armBurstWatchdog） */
@@ -272,19 +283,29 @@ function latchBurst(): void {
   armBurstWatchdog()
 }
 
-function startTransient(status: PetStatus): void {
+/**
+ * 起一轮本地瞬时动画。
+ * `self`（卡 19）= 这一轮是不是入口**自发**的随机表演：只有 `syncBurst` 会传 true，
+ * 用户互动（`interact()` 的两处调用）走默认 false。播完时靠它决定要不要锁存折 idle。
+ */
+function startTransient(status: PetStatus, self = false): void {
   // 页面侧的 isTransient 含 trot / run-left / run-right（与入口的权威集合**有意不同**，理由见 app/lib/anim.ts 注释）
   if (!isTransient(status)) return
   transient.value = status
+  transientIsSelf = self
   clearTimer(transientTimer)
   const p = plan.value
-  const total = p && p.status === status ? p.total : BURST_FALLBACK_MS
-  // 兜底：页面不可见时帧时钟停摆、onCycleEnd 不会来，靠这个定时器保证动画不会永久卡住
+  // 轮长取该轨的真实总时长；计划还没算出来 / 算的是别的轨 ⇒ 交给 burstFallbackMs 用兜底值
+  const round = p && p.status === status ? p.total : null
+  // 兜底：页面不可见时帧时钟停摆、onCycleEnd 不会来，靠这个定时器保证动画不会永久卡住。
+  // 时刻固定为"该轨一轮 + 既有 slack"，**不依赖入口的下一次推送**——入口的 transient 到期
+  // 既不 rev++ 也不推送，等下一次 15s tick 就是 D-1 实机看到的 5/10/15s 停留。
   transientTimer = setTimer(() => {
-    if (isSelfBurst(transient.value)) latchBurst()
+    if (transientIsSelf) latchBurst()
     transient.value = null
+    transientIsSelf = false
     transientTimer = 0
-  }, total + TRANSIENT_SLACK_MS)
+  }, burstFallbackMs(round))
 }
 
 /**
@@ -294,22 +315,26 @@ function startTransient(status: PetStatus): void {
  * 入口每 10 秒随机抽一条，**连着两轮抽到同一条**时状态字符串没有变化，watch 根本不会触发
  * ⇒ 那一轮会被吞掉。收包是"入口又报了一次"的唯一可靠信号（rev 变了才会走到这里）。
  *
- * - 入口报的是用户互动（eating/bathing/playing/petted）或普通状态 ⇒ 清锁存，交回状态驱动；
- * - 入口报的是表演轨（trot/run-left/run-right）：全新的一条、或上一轮已经播完（锁存中）⇒ 起一轮；
+ * 判据是入口给的 `anim.self`（**不是**状态字符串：随机集里 eating/bathing/petted/playing 四项
+ * 与真实互动同名同轨，字符串无从区分——卡 18 的 `isSelfBurst` 只能认三条同构轨，这就是 D-1 的根因）：
+ * - `self !== true`（真实互动 / 普通状态 / 打盹 / 拖动中折出来的 idle）⇒ 清锁存，交回状态驱动
+ *   （真实互动那一轮由 `interact()` 自己起，`anim.self=false` 保证它不会被折成 idle）；
+ * - `self === true` 且 status 是表内合法状态轨（`knownStatus` 守门，畸形回包不许起一轮）：
+ *   全新的一条、或上一轮已经播完（锁存中）⇒ 起一轮（`self=true`）；
  *   同一轮里的重复推送（15s tick 恰好落在这一轮内）⇒ 不重起，否则动画会被打回第 0 帧；
- * - `force`：看门狗补拉到权威状态时用——入口此刻还在报这条表演轨，就当作新一轮重播。
+ * - `force`：看门狗补拉到权威状态时用——入口此刻还在报这条自发表演，就当作新一轮重播。
  */
-function syncBurst(status: unknown, force = false): void {
-  if (!isSelfBurst(status)) {
+function syncBurst(anim: { status: string; self: boolean }, force = false): void {
+  const burst = anim.self === true ? knownStatus(anim.status) : undefined
+  if (!burst) {
     burstLatched.value = false
     burstLatchedStatus = null
     return
   }
-  const burst = status as PetStatus
   if (!force && burstLatchedStatus === burst && !burstLatched.value) return
   burstLatchedStatus = burst
   burstLatched.value = false
-  startTransient(burst)
+  startTransient(burst, true)
 }
 
 /**
@@ -367,8 +392,9 @@ function applyState(raw: unknown, forceBurst = false): void {
   state.value = next
   syncing.value = false
   // 卡 18（Q16）：入口自发的随机表演是"播一轮就回落"的 burst，逐份状态收包时同步它
-  // （顺序要紧：先落定 state.value，startTransient 里的 plan 才能算到这一条）
-  syncBurst(next.anim.status, forceBurst)
+  // （顺序要紧：先落定 state.value，startTransient 里的 plan 才能算到这一条）。
+  // 卡 19（热修 D-1）：判据取整份 anim（含来源标记 self），不再只看状态字符串。
+  syncBurst(next.anim, forceBurst)
   const b = next.bubble
   if (!b) return
   const remaining = b.until - Date.now()
@@ -454,7 +480,9 @@ async function subscribeLoop(): Promise<void> {
 // ---- 交互 ----
 async function interact(kind: InteractKind): Promise<void> {
   if (!bridge || stopped) return
-  // 摸头：冷却内的点击也 MUST 播反馈动画（specs/pet-interaction）⇒ 不等回包就先播
+  // 摸头：冷却内的点击也 MUST 播反馈动画（specs/pet-interaction）⇒ 不等回包就先播。
+  // 卡 19：真实互动起的都是 `self=false` 的轮次（默认值）——它们**不会**被锁存折成 idle，
+  // 因此"随机表演期间点互动"必然是"气泡与动画同为互动"，不会出现"气泡还在、动画已切"。
   if (kind === 'pet') startTransient('petted')
   const res = await bridge.request('pet.interact', { kind }, REQUEST_TIMEOUT_MS)
   if (stopped) return
@@ -832,6 +860,7 @@ function teardown(): void {
   timers.clear()
   bubbleTimer = 0
   transientTimer = 0
+  transientIsSelf = false
   burstWatchdog = 0
   burstLatched.value = false
   if (motionQuery) motionQuery.removeEventListener('change', onMotionChange)

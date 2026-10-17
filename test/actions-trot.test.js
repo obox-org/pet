@@ -25,6 +25,7 @@ import {
   RANDOM_PERF_SET,
   RANDOM_PERF_TIMER_ID,
   SLEEP_AFTER_MS,
+  TEXT,
   TICK_ID,
   TRANSIENT_MS
 } from '../lib/constants.js'
@@ -34,12 +35,13 @@ import {
   STATUS_TRACK,
   animOf,
   frameDurations,
-  isSelfBurst,
+  isSelfTransient,
   isTransient,
   resolveStatus,
   trackTotalMs
 } from '../lib/mapping.js'
 import { buildView } from '../lib/bridge.js'
+import { serialize, deserialize } from '../lib/persist.js'
 import { initialState } from '../lib/settle.js'
 import { flush, makeApi } from './helpers/mock-api.js'
 
@@ -173,24 +175,53 @@ test('卡18 · 优先级：状态指示轨 > 表演轨（与 trot 同档）> idl
   assert.equal(STATUS_LABEL['run-right'], '向右小跑')
 })
 
-test('卡18 · transient 集合：表演轨被认作 transient（否则会被属性判定当场顶掉）；isSelfBurst 只认自发的三条', () => {
+test('卡19 · transient 集合：七项表演轨都被认作 transient（否则会被属性判定当场顶掉）；来源靠 transientSelf 而非状态字符串', () => {
   for (const status of RANDOM_PERF_SET) {
     assert.equal(isTransient(status), true, `${status} 写进 transient 后必须被 resolveStatus 认出来`)
   }
-  for (const status of ['trot', 'run-left', 'run-right']) {
-    assert.equal(isSelfBurst(status), true, `${status} 是入口自发的表演轨`)
+  // 卡 19（热修 D-1）：入口侧的 isSelfBurst/SELF_BURST_STATUSES 已整条删除——它只能识别
+  // trot/run-left/run-right 三条同构轨，对同名四项（eating/bathing/petted/playing）无能为力，
+  // 那正是 D-1 的根因。来源改由 `state.transientSelf` 记录，判据是 isSelfTransient。
+  const perIsSelf = (status, transientSelf) => ({
+    ...initialState(T0),
+    transient: { status, until: T0 + TRANSIENT_MS[status] },
+    transientSelf
+  })
+  for (const status of RANDOM_PERF_SET) {
+    assert.equal(
+      isSelfTransient(perIsSelf(status, true), T0),
+      true,
+      `${status}：transientSelf=true ⇒ 认作自发表演（七项逐项）`
+    )
+    assert.equal(isSelfTransient(perIsSelf(status, false), T0), false, `${status}：互动写的轮次不是自发表演`)
   }
-  for (const status of ['eating', 'bathing', 'playing', 'petted', 'hungry', 'sleep', 'idle']) {
-    assert.equal(isSelfBurst(status), false, `${status} 不是入口自发的表演轨`)
+  // 状态字符串本身**不足以**区分来源：同一份 eating，标记不同 ⇒ 判据不同（这正是必须新增标记的理由）
+  assert.equal(isSelfTransient(perIsSelf('eating', true), T0), true)
+  assert.equal(isSelfTransient(perIsSelf('eating', false), T0), false)
+  // 畸形 transientSelf 一律归一 false（任务卡负向自检）；无 transient / 已到期也一律 false
+  for (const bad of ['true', 1, 0, null, undefined, {}, []]) {
+    assert.equal(
+      isSelfTransient(perIsSelf('eating', bad), T0),
+      false,
+      `畸形 transientSelf（${JSON.stringify(bad) ?? String(bad)}）⇒ false`
+    )
   }
+  assert.equal(isSelfTransient({ ...initialState(T0), transientSelf: true }, T0), false, '无 transient ⇒ false')
+  assert.equal(
+    isSelfTransient(perIsSelf('run-left', true), T0 + TRANSIENT_MS['run-left']),
+    false,
+    'transient 到期 ⇒ false（即便标记还在）'
+  )
   // resolveStatus：表演写在 transient 里 ⇒ 短暂覆盖状态指示轨；到期后回落到真实判定
   const hungry = { ...initialState(T0), hunger: 10 }
-  const performing = { ...hungry, transient: { status: 'run-left', until: T0 + 1800 } }
+  const performing = { ...hungry, transient: { status: 'run-left', until: T0 + 1800 }, transientSelf: true }
   assert.equal(resolveStatus(performing, T0), 'run-left', '表演高于 hungry（Q16）')
   assert.equal(resolveStatus(performing, T0 + 1800), 'hungry', '一轮播完 ⇒ 回落真实判定')
-  // 拖动中不报入口自发的表演（buildView 的 dragging 折叠，D-13）
+  // 拖动中不报入口自发的表演（buildView 的 dragging 折叠，D-13）：status 与 self 一起折
   assert.equal(buildView(performing, T0, { dragging: true }).anim.status, 'idle', '被拎起来时不自己跑')
+  assert.equal(buildView(performing, T0, { dragging: true }).anim.self, false, '折 idle 时来源标记也如实报 false')
   assert.equal(buildView(performing, T0).anim.status, 'run-left', '没拖动就照常播')
+  assert.equal(buildView(performing, T0).anim.self, true, '没拖动 ⇒ 如实报自发表演')
 })
 
 // ————— 入口层：到点抽签、播一轮、回落 —————
@@ -205,16 +236,21 @@ test('卡18 随机表演 · 到点抽一条播一轮（row/label/status 齐全�
   perf()
   await flush(2)
   const during = (await rec.send('pet.state')).state
-  assert.deepEqual(during.anim, animOf(RANDOM_PERF_SET[0]), '抽中那一条的 row/label/status')
+  // 卡 19：自发表演的视图必须带 self=true（页面靠它决定"播完折回呼吸 idle"）
+  assert.deepEqual(during.anim, { ...animOf(RANDOM_PERF_SET[0]), self: true }, '抽中那一条的 row/label/status + self')
   assert.equal(during.bubble, null, '随机表演 MUST NOT 弹气泡')
   assert.deepEqual(during.vitals, before.vitals, '三属性一个字节不变')
   assert.deepEqual(during.items, before.items, '不消耗道具')
   assert.deepEqual(during.growth, before.growth, '成长值不变')
 
   advance(TRANSIENT_MS[RANDOM_PERF_SET[0]] - 1)
-  assert.equal((await rec.send('pet.state')).state.anim.status, RANDOM_PERF_SET[0], '一轮还没播完')
+  const justBefore = (await rec.send('pet.state')).state
+  assert.equal(justBefore.anim.status, RANDOM_PERF_SET[0], '一轮还没播完')
+  assert.equal(justBefore.anim.self, true, '一轮还没播完 ⇒ 仍是自发表演（页面据此渲染这一轮）')
   advance(1)
-  assert.equal((await rec.send('pet.state')).state.anim.status, 'idle', '一轮播完 ⇒ 回落判定（idle）')
+  const justAfter = (await rec.send('pet.state')).state
+  assert.equal(justAfter.anim.status, 'idle', '一轮播完 ⇒ 回落判定（idle）')
+  assert.equal(justAfter.anim.self, false, '一轮播完 ⇒ 来源标记也回落（页面据此停止折 idle）')
   await flush(2)
   assert.equal(mainWrites(), writes0, '表演不改任何持久化数值 ⇒ 一次盘都不写')
   cleanup()
@@ -366,4 +402,149 @@ test('卡18 随机表演 · 侧跑轨只原地播帧：run-left / run-right 整�
     assert.deepEqual(rec.positions.get(OVERLAY_ID), position0, `${status}：窗体实际坐标不变`)
   }
   cleanup()
+})
+
+// ————— 卡 19 · 热修 D-1（v1.0.1）：来源标记 anim.self（入口侧） —————
+//
+// D-1：随机抽到 `eating`/`bathing`/`petted`/`playing` 四项时播完不回落到呼吸 idle
+// （实机 DOM 停留 5.0/10.0/15.0s，连续多轮同轨连成一片 24.98s）。根因是入口的 `transient`
+// 被随机表演与真实互动**共用**、状态字符串完全相同，页面无从区分来源。
+// 修法①：入口在写 transient 时同时记录来源（`transientSelf`），并在视图里暴露成 `anim.self`。
+// 下面两条逐项钉住"七项随机抽到 ⇒ self=true""四种真实互动 ⇒ self=false"（核心断言，务必参数化）。
+
+test('卡19 · anim.self：七项随机抽到**逐项**为 true（参数化），且一轮播完逐项回落为 false/idle', async (t) => {
+  const { rec, cleanup, advance, perf } = activate(t)
+  await flush()
+  // 初始态（无 transient）⇒ self 必须是明确的 false
+  assert.equal((await rec.send('pet.state')).state.anim.self, false, '无 transient ⇒ self=false')
+
+  let randomValue = 0
+  t.mock.method(Math, 'random', () => randomValue)
+  for (let i = 0; i < RANDOM_PERF_SET.length; i++) {
+    const status = RANDOM_PERF_SET[i]
+    randomValue = pickIndex(i)
+    perf()
+    await flush(2)
+    const during = (await rec.send('pet.state')).state
+    assert.equal(during.anim.status, status, `第 ${i} 项：抽中的状态`)
+    assert.equal(during.anim.self, true, `${status}：自发表演 ⇒ anim.self=true`)
+    assert.equal(during.anim.row, STATUS_TRACK[status].row, `${status}：行号不变`)
+
+    // 一轮 +/1ms 的边界：still self ⇒ 到期 ⇒ false + 回落 idle（入口权威判定）
+    advance(TRANSIENT_MS[status] - 1)
+    assert.equal((await rec.send('pet.state')).state.anim.self, true, `${status}：一轮还没播完仍是自发表演`)
+    advance(1)
+    const after = (await rec.send('pet.state')).state
+    assert.equal(after.anim.self, false, `${status}：一轮播完 ⇒ anim.self=false`)
+    assert.equal(after.anim.status, 'idle', `${status}：播完必回落呼吸 idle（D-1 核心断言）`)
+  }
+  cleanup()
+})
+
+test('卡19 · anim.self：四种真实互动**逐项**为 false（与随机抽到同名同轨时的唯一区分手段）', async (t) => {
+  const { rec, cleanup } = activate(t)
+  await flush()
+  for (const [kind, status] of [
+    ['feed', 'eating'],
+    ['bathe', 'bathing'],
+    ['play', 'playing'],
+    ['pet', 'petted']
+  ]) {
+    const r = await rec.send('pet.interact', { kind })
+    assert.equal(r.ok, true, `${kind} 成功`)
+    assert.equal(r.state.anim.status, status, `${kind} ⇒ ${status} 轨`)
+    assert.equal(r.state.anim.self, false, `${kind}：真实互动 ⇒ anim.self=false（页面不得折掉这一轮）`)
+    // 与"随机抽到同一条"的对照：状态字符串一样，self 不同（这正是必须新增来源标记的理由）
+    assert.ok(RANDOM_PERF_SET.includes(status), `${status} 也在随机集里（同名同轨）`)
+  }
+  cleanup()
+})
+
+test('卡19 · 随机表演期间触发互动 ⇒ 动画与气泡**同时**为互动（不再"气泡还在、动画已切"）', async (t) => {
+  const { rec, cleanup, perf } = activate(t)
+  await flush()
+  // 先让随机表演抽到 eating（与喂食同名同轨的那一条）
+  t.mock.method(Math, 'random', () => pickIndex(RANDOM_PERF_SET.indexOf('eating')))
+  perf()
+  await flush(2)
+  const during = (await rec.send('pet.state')).state
+  assert.equal(during.anim.status, 'eating', '表演正在播（eating 轨）')
+  assert.equal(during.anim.self, true, '表演期间 self=true')
+  assert.equal(during.bubble, null, '随机表演自己不弹气泡')
+
+  const r = await rec.send('pet.interact', { kind: 'play' })
+  assert.equal(r.ok, true)
+  // 动画：立刻切到互动那一轨，且来源标记翻回 false（页面据此不折这一轮）
+  assert.equal(r.state.anim.status, 'playing', '互动动画立刻顶掉表演')
+  assert.equal(r.state.anim.self, false, '互动轮次 ⇒ self=false（与表演彻底区分开）')
+  // 气泡：同一份回包里就有互动反馈 ⇒ 动画与气泡同时生效
+  assert.equal(r.state.bubble.text, TEXT.playOk, '气泡与动画同为互动（"玩得好开心！"）')
+  assert.equal(r.state.bubble.tone, 'good')
+  cleanup()
+})
+
+test('卡19 · transientSelf 是运行时字段：**不落盘**（serialize 白名单断言）、读档归一 false', () => {
+  const state = {
+    ...initialState(T0),
+    transient: { status: 'eating', until: T0 + TRANSIENT_MS.eating },
+    transientSelf: true
+  }
+  const text = serialize(state)
+  assert.equal(text.includes('transientSelf'), false, 'serialize 白名单不含 transientSelf（不落盘）')
+  assert.equal(text.includes('transient'), false, 'transient 本身同样不落盘（既有口径）')
+  assert.equal(
+    Object.hasOwn(JSON.parse(text), 'transientSelf'),
+    false,
+    '落盘 JSON 里连键都没有'
+  )
+  // 读档：白名单构造 ⇒ 运行时字段一律清空/归一 false（存档里就算被人手写进去也不生效）
+  const forged = JSON.stringify({
+    schemaVersion: 1,
+    hunger: 100,
+    clean: 100,
+    mood: 100,
+    fish: 3,
+    bubble: 3,
+    growth: 0,
+    hungerDropAcc: 0,
+    cleanDropAcc: 0,
+    recoverAcc: 0,
+    afkAcc: 0,
+    lastSettledAt: T0,
+    lastPetAt: 0,
+    position: null,
+    transientSelf: true,
+    transient: { status: 'eating', until: T0 + 99999 }
+  })
+  const back = deserialize(forged)
+  assert.equal(back.ok, true)
+  assert.equal(back.state.transientSelf, false, '读档归一 false')
+  assert.equal(back.state.transient, null, '读档清空 transient')
+  assert.equal(
+    serializedKeys(back.state).includes('transientSelf'),
+    false,
+    '往返一圈仍不落盘'
+  )
+})
+
+/** serialize 的顶层键（用真实序列化结果取键，而不是手写一份待核对的白名单） */
+function serializedKeys(state) {
+  return Object.keys(JSON.parse(serialize(state)))
+}
+
+test('卡19 · 畸形 transientSelf（字符串/数字/null/对象）⇒ 视图 anim.self 归一 false，不误折真实互动', () => {
+  for (const bad of ['true', 'eating', 1, 0, null, undefined, {}, []]) {
+    const view = buildView(
+      { ...initialState(T0), transient: { status: 'eating', until: T0 + 1600 }, transientSelf: bad },
+      T0
+    )
+    assert.equal(view.anim.self, false, `畸形 transientSelf=${String(bad)} ⇒ anim.self=false`)
+  }
+  // 反向自检：真布尔 true 必须如实为 true（不是"一律 false"的假绿）
+  const ok = buildView(
+    { ...initialState(T0), transient: { status: 'eating', until: T0 + 1600 }, transientSelf: true },
+    T0
+  )
+  assert.equal(ok.anim.self, true, 'transientSelf=true ⇒ anim.self=true')
+  assert.equal(Object.hasOwn(ok.anim, 'self'), true, 'anim 恒有 self 键（false 也是明确语义）')
 })

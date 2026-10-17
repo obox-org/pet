@@ -146,15 +146,16 @@ const T0 = 1_700_000_000_000
 test('卡12 · buildView().anim 携带机器可读 status：= resolveStatus 的英文 key，∈ STATUS_TRACK 九键', () => {
   const base = initialState(T0) // 三属性全满、lastInteractAt = T0 ⇒ idle
   const idleView = buildView(base, T0)
-  assert.deepEqual(idleView.anim, { row: 0, label: '待机', status: 'idle' })
+  // 卡 19 起 anim 多一项来源标记 self：非 transient 状态一律 false（这里三项都是 false）
+  assert.deepEqual(idleView.anim, { row: 0, label: '待机', status: 'idle', self: false })
 
   // 连续 10 分钟无交互 ⇒ sleep：row 仍是 0（idle 行），label 中文'打盹'，status 'sleep'
   const sleepView = buildView({ ...base, lastInteractAt: T0 - 600_000 }, T0)
-  assert.deepEqual(sleepView.anim, { row: 0, label: '打盹', status: 'sleep' })
+  assert.deepEqual(sleepView.anim, { row: 0, label: '打盹', status: 'sleep', self: false })
 
-  // 瞬时互动同样带对应 key（eating → row 4）
+  // 瞬时互动同样带对应 key（eating → row 4）；没有 transientSelf 标记 ⇒ self 为 false（不是自发表演）
   const eatingView = buildView({ ...base, transient: { status: 'eating', until: T0 + 1600 } }, T0)
-  assert.deepEqual(eatingView.anim, { row: 4, label: '喂食', status: 'eating' })
+  assert.deepEqual(eatingView.anim, { row: 4, label: '喂食', status: 'eating', self: false })
 
   // status 恒为 STATUS_TRACK 的键之一（单一来源，页面 knownStatus 只认这九个）
   for (const view of [idleView, sleepView, eatingView]) {

@@ -250,7 +250,7 @@ test('pet-window · 悬停唤醒：睡够 10 分钟后 pet.hit{inside:true} ⇒ 
 
   advance(600_000) // 连续 10 分钟无交互 ⇒ 入睡（无需 tick：sleep 是构建视图时判定的派生状态）
   const sleeping = await rec.send('pet.state')
-  assert.deepEqual(sleeping.state.anim, { row: 0, label: '打盹', status: 'sleep' })
+  assert.deepEqual(sleeping.state.anim, { row: 0, label: '打盹', status: 'sleep', self: false })
 
   let subReply
   const sub = rec.send('pet.subscribe', { rev: 0 }).then((r) => {
@@ -263,6 +263,6 @@ test('pet-window · 悬停唤醒：睡够 10 分钟后 pet.hit{inside:true} ⇒ 
   await sub
   assert.equal(subReply.ok, true)
   assert.equal(subReply.rev, 1, '状态可见变化（sleep→idle）⇒ rev+1 并唤醒')
-  assert.deepEqual(subReply.state.anim, { row: 0, label: '待机', status: 'idle' })
+  assert.deepEqual(subReply.state.anim, { row: 0, label: '待机', status: 'idle', self: false })
   cleanup()
 })

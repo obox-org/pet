@@ -343,14 +343,13 @@ test('卡18 · 页面映射：trot→running(7)、run-left→running-left(2)、r
     assert.match(setBody, new RegExp(`'${status}'`), `页面把 ${status} 当"播一轮就回落"处理`)
   }
   assert.match(animTs.slice(0, setAt), /有意不同/, '注释说明与入口集合的差异（防后人"对齐"错）')
-  // 只认入口自发那三条的判据（与入口 mapping.js 的 isSelfBurst 同名同值）
-  assert.match(animTs, /export function isSelfBurst\(status: unknown\): boolean/, '导出 isSelfBurst')
-  const burstAt = animTs.indexOf('const SELF_BURST_SET')
-  const burstBody = animTs.slice(burstAt, animTs.indexOf(']', burstAt))
-  for (const status of ['trot', 'run-left', 'run-right']) {
-    assert.match(burstBody, new RegExp(`'${status}'`), status)
-  }
-  assert.equal(/'eating'/.test(burstBody), false, '用户点出来的互动不是"入口自发"的 burst')
+  // 卡 19（热修 D-1）：页面侧的"状态字符串来源判据"（isSelfBurst / SELF_BURST_SET）已整条删除——
+  // 它认不出与真实互动同名同轨的四项（随机抽到的 eating 与用户点喂食是同一个字符串），
+  // 那正是 D-1 的根因。来源改由入口视图的 anim.self 承担（判定在 app/lib/burst.ts，
+  // 由 test/hotfix-19-self-fallback.test.js 真跑覆盖）。
+  // 断言"声明已删"而不是"整个文件不含该字样"：历史注疏里保留旧名是为了让后人看懂为什么删。
+  assert.equal(/export function isSelfBurst\s*\(/.test(animTs), false, 'isSelfBurst 声明已删（防回归）')
+  assert.equal(/SELF_BURST_SET\s*[:=]/.test(animTs), false, '同名集合声明已删（防回归）')
 })
 
 test('卡18 · 页面周期镜像 = 10 秒；且它有真实消费者（锁存看门狗），不是装饰常量', () => {
@@ -367,23 +366,30 @@ test('卡18 · 页面周期镜像 = 10 秒；且它有真实消费者（锁存�
   assert.match(resync, /if \(!ok \|\| !data \|\| data\.state === undefined\) return/, '拉不到就保持锁存（不退化成"一直跑"）')
 })
 
-test('卡18 · 入口自发表演的本地锁存：播完一轮置锁存、收包驱动重播、锁存期间 status/row 双双降级', () => {
+test('卡18/19 · 入口自发表演的本地锁存：播完一轮置锁存、收包驱动重播、锁存期间 status/row 双双降级', () => {
   assert.match(app, /const burstLatched = ref\(false\)/, '有锁存位')
+  // 卡 19（热修 D-1）：判据是"这一轮是不是入口自发的"（本地记录 + 入口 anim.self），
+  // **不是**状态字符串——同名同轨的四项（eating/bathing/petted/playing）靠字符串分不出来。
+  assert.match(app, /let transientIsSelf = false/, '本地记下这一轮的来源')
   const cycle = app.slice(app.indexOf('function onCycleEnd()'), app.indexOf('function latchBurst()'))
-  assert.match(cycle, /if \(isSelfBurst\(finished\)\) latchBurst\(\)/, '播完一轮（且是入口自发的表演）⇒ 置锁存')
+  assert.match(cycle, /const wasSelf = transientIsSelf/, '播完先取这一轮的来源')
+  assert.match(cycle, /if \(wasSelf\) latchBurst\(\)/, '自发表演播完一轮 ⇒ 置锁存')
   assert.match(app, /function latchBurst\(\)[\s\S]{0,160}burstLatched\.value = true[\s\S]{0,80}armBurstWatchdog\(\)/, '置锁存并挂看门狗')
-  // 兜底定时器（页面不可见时 rAF 停摆）走同一条锁存路径
+  // 兜底定时器（页面不可见时 rAF 停摆）走同一条锁存路径，时限 = 该轨一轮 + 既有 slack
   const start = app.slice(app.indexOf('function startTransient('), app.indexOf('function syncBurst('))
-  assert.match(start, /isSelfBurst\(transient\.value\)\) latchBurst\(\)/, '兜底回落同样置锁存')
-  assert.match(start, /p\.status === status \? p\.total : BURST_FALLBACK_MS/, '轮长取该轨真实总时长，缺计划时用不小于最长一轮的兜底值')
+  assert.match(start, /transientIsSelf = self/, '起一轮时记下来源（互动走默认 false）')
+  assert.match(start, /if \(transientIsSelf\) latchBurst\(\)/, '兜底回落同样置锁存')
+  assert.match(start, /burstFallbackMs\(round\)/, '时限来自纯函数 burstFallbackMs（= 一轮 + slack）')
+  assert.match(start, /p\.status === status \? p\.total : null/, '轮长取该轨真实总时长，缺计划时交给兜底值')
   // 收包驱动（不是 watch 状态字符串：连着两轮抽到同一条时 watch 看不到变化，那一轮会被吞掉）
   const apply = app.slice(app.indexOf('function applyState('), app.indexOf('function maybeShowSleepHint'))
-  assert.match(apply, /syncBurst\(next\.anim\.status, forceBurst\)/, 'applyState 里同步 burst')
+  assert.match(apply, /syncBurst\(next\.anim, forceBurst\)/, 'applyState 里同步 burst（整份 anim，含 self）')
   assert.equal(app.includes('() => display.value.anim.status'), false, '旧的"盯状态字符串"的 watch 已删')
   const sync = app.slice(app.indexOf('function syncBurst('), app.indexOf('function armBurstWatchdog()'))
+  assert.match(sync, /anim\.self === true \? knownStatus\(anim\.status\) : undefined/, '判据是 anim.self + 合法状态轨')
+  assert.match(sync, /startTransient\(burst, true\)/, '新一轮 ⇒ 本地起一轮（self=true）')
   assert.match(sync, /if \(!force && burstLatchedStatus === burst && !burstLatched\.value\) return/, '同一轮里的重复推送不重起（否则动画被打回第 0 帧）')
-  assert.match(sync, /startTransient\(burst\)/, '新一轮 ⇒ 本地起一轮')
-  // 锁存期间送进 decideAnimation 的 status 与 row 双双降级（row 不降级会走 planForRow 继续跑）
+  // 锁存期间送进 decideAnimation 的 status 与 row 双双降级（由纯函数按 anim.self 判定）
   assert.match(app, /const entryStatus = computed/, '有降级后的 status')
   assert.match(app, /const entryRow = computed/, '有降级后的 row')
   assert.match(app, /animStatus: entryStatus\.value/, 'decideAnimation 吃降级后的 status')

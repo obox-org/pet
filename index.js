@@ -40,10 +40,11 @@ import {
   TEXT,
   TICK_ID,
   TICK_SECONDS,
-  TRANSIENT_MS
+  TRANSIENT_MS,
+  TRANSIENT_TIMER_ID
 } from './lib/constants.js'
 import { interact } from './lib/interact.js'
-import { isTransient, resolveStatus } from './lib/mapping.js'
+import { isTransient, resolveStatus, transientDelaySeconds, transientExpired } from './lib/mapping.js'
 import { deserialize, sanitizePosition, serialize } from './lib/persist.js'
 import { initialState, settle, startupReset } from './lib/settle.js'
 
@@ -371,6 +372,66 @@ export default function pet(api) {
     return p
   }
 
+  // ————— transient 到期主动推送（卡 19 · 父代理裁定 R54） —————
+  /**
+   * 为"当前这一轮 transient"排一次到期推送（`pet-transient`，一次性 setTimeout）。
+   *
+   * **为什么必须有它**：入口的 `state.transient` 到期**不会自己推送**——`resolveStatus` 只是不再认它，
+   * 下一次 rev++ 要等 `pet-tick`（15 秒，且只在属性真的变化时）或下一轮 `pet-perf`（10 秒）。
+   * 页面因此在"用户点出来的那一轮"播完后仍按最近一次视图的 `anim.status` 继续渲染该轨
+   * （进食/洗澡姿态挂着，最长 15 秒）——复验报告 D-1「影响面 ③」记的就是这条。
+   * 页面侧**不能**自己按本地轮长折 idle：`prefers-reduced-motion: reduce`（400ms/帧）下页面轮长会
+   * **长于**入口的 `TRANSIENT_MS`，提前折会掐掉用户刚点的动作。所以由入口承担这一半。
+   *
+   * **秒级取整**：`api.timer` 只收 **1–86400 的整数秒**（api-reference.md:405-414,552-572），
+   * 没有毫秒级入口 ⇒ 用 `transientDelaySeconds`（**向上取整**，宁晚 ≤1 秒也绝不早到；
+   * 早到会被 `transientExpired` 挡掉并按剩余时间重排）。取整的实际代价逐轨写在回执里。
+   *
+   * **覆盖语义（先清后设）**：三只定时器共用 `api.timer` 的名字空间，但到期推送固定用同一个 id
+   * `pet-transient` ⇒ 新一轮 transient 落定时这里先 `clearTimeout` 再 `setTimeout`，
+   * 任何时刻**至多一个**待触发的到期推送（宿主对同 id 重复设置本就是重置，clear 让 mock/断言也看得到）。
+   *
+   * 没有 transient / until 畸形 ⇒ **不排**（不为不存在的轮次空转；否则 1 秒一次的自我重排会成死循环）。
+   */
+  function armTransientExpiry(now, transient) {
+    const until = transient && typeof transient === 'object' ? transient.until : undefined
+    if (typeof until !== 'number' || !Number.isFinite(until)) return
+    api.timer.clearTimeout(TRANSIENT_TIMER_ID)
+    api.timer.setTimeout(TRANSIENT_TIMER_ID, transientDelaySeconds(until, now), onTransientExpire)
+  }
+
+  /**
+   * 到期（或定时器早到）时的处理：**恰好三件事**——清运行时字段 → `rev++` → 唤醒推送。
+   *
+   * 次序与 D-8 一致（状态落定后才 rev+1，页面拿到的是同一份完整视图）。
+   * **不清设置键、不写盘**：transient / transientSelf 都是不落盘的渲染态，三属性一个字节没动
+   * （写盘节流签名的口径也不含它们）⇒ 到期推送不产生任何磁盘 IO。
+   *
+   * 幂等（硬要求）：清完 `state.transient` 为 null，**再次触发直接返回**（不会连推多个 rev；
+   * 重复推送只会让页面白重绘）。宿主的一次性 setTimeout 触发后本就消失，这里不额外 clear。
+   *
+   * 早到（时钟回拨 / 定时器漂移）：`transientExpired` 为假 ⇒ **不清也不推**，按剩余时间**重排**一次
+   * （不重排的话这一轮就再没人推，又退回"挂到下一次 tick"）。
+   *
+   * 门控口径（与既有路径的对照，写清以免后人误加判断）：
+   * - **无窗体**（`!overlayAlive`）：照清照推。清 transient 只是让状态回到"本就该有"的基础态
+   *   （`resolveStatus` 在 `until` 之后本就不再认它），hub 为空时 `wake()` 是 no-op，`rev++` 无副作用；
+   * - **拖动中**：照清照推。`until` 是**墙钟截止时刻**，拖动不会延长它；拖动中 `buildView` 本就把输出
+   *   折成 idle（D-13），清不清都不影响拖动中的画面，松手后按当时的条件重新判定，不会被"卡在半轮"；
+   * - **打盹/属性过低**：与它们无关——到期后视图自然是按 `resolveStatus` 判定出来的真实状态。
+   */
+  function onTransientExpire() {
+    if (disposed || !state) return
+    const now = Date.now()
+    if (!transientExpired(state, now)) {
+      armTransientExpiry(now, state.transient) // 早到：按剩余时间重排（不清、不推）
+      return
+    }
+    state = { ...state, transient: null, transientSelf: false }
+    rev++
+    hub.wake()
+  }
+
   // ————— 随机表演（design D-14 改版 / 用户裁定 Q16；specs/pet-sprites 的随机表演 requirement） —————
   /**
    * 每 10 秒随机播一轮"表演型"动作（`RANDOM_PERF_EVERY_SEC` / `RANDOM_PERF_SET` 是单一来源）。
@@ -392,6 +453,12 @@ export default function pet(api) {
    * （它不是用户交互，不能把 `sleep` 推后）。
    * `run-left`/`run-right` 也只是原地播帧：这条路径里**没有** `api.overlay.setPosition`
    * （宠物不位移，design Non-Goals）。
+   *
+   * 卡 19（热修 D-1）：写 transient 时**必须同时置 `transientSelf: true`**——
+   * 随机集里有 `eating`/`bathing`/`petted`/`playing` 四项与真实互动同名同轨，
+   * 页面只拿到状态字符串，分不出"这一轮是随机抽的还是用户刚点的"，于是本地一轮播完后
+   * 仍按入口的 `animStatus='eating'` 一直渲染（实机停留 5/10/15s、连成一片 24.98s）。
+   * 来源只能由写入方记录：这里是唯一的"自发"写入点（真实互动在 lib/interact.js 写 false）。
    */
   function onRandomPerf() {
     if (disposed || !state) return
@@ -404,7 +471,10 @@ export default function pet(api) {
     const pick = RANDOM_PERF_SET[Math.floor(Math.random() * RANDOM_PERF_SET.length)]
     const ms = TRANSIENT_MS[pick]
     if (!pick || !(ms > 0)) return // 常量被改坏 ⇒ 宁可不动，也不写一个畸形 transient
-    state = { ...state, transient: { status: pick, until: now + ms } }
+    // transientSelf 与 transient 同生命周期：两者在同一次状态写入里落定，读档/初始态里都是干净值
+    state = { ...state, transient: { status: pick, until: now + ms }, transientSelf: true }
+    // 卡 19（R54）：到期主动推一次（R54 前要等下一次 pet-perf/pet-tick，页面会把这条表演轨挂住）
+    armTransientExpiry(now, state.transient)
     rev++ // 状态落定后才 +1（D-8 次序）：页面据此换轨并播完一轮自行回落
     hub.wake()
   }
@@ -461,6 +531,11 @@ export default function pet(api) {
             }
             // 卡 18（Q16）：随机表演不再需要"窗体就位时立刻排一次"——它是与窗体无关的 10 秒周期
             // 定时器（onRandomPerf 每轮自己看 overlayAlive）。toggle 关→开之间的空转被这一条挡掉。
+            // 卡 19（R54）：**唯独**"transient 到期推送"要在重建时补排——销毁路径会清掉它
+            // （见下面 else 分支），若用户在某一轮还没到期时关→开（1.x 秒内），不补这一手
+            // 那条边界又会退回"姿态挂到下一次 tick"。已过期时 `transientDelaySeconds` 给 1 秒、
+            // 回调的到期校验立刻放行 ⇒ 只补一次推送，不会空转。
+            if (state && state.transient && !disposed) armTransientExpiry(Date.now(), state.transient)
           } else {
             const reason = (res && res.error) || '未知原因'
             lastCreateFailed = true // D-1 判据：本次创建失败 ⇒ 启动复位不吃掉这条诊断
@@ -473,6 +548,10 @@ export default function pet(api) {
           overlayAlive = false
           throughNow = true
           dragging = false // 窗体销毁时若正在拖动：拖动会话随之作废（end 到达时按"窗体已关闭"拒绝）
+          // 卡 19（R54）：窗体没了就不必再为它推送到期视图（rebuild 时按剩余时间补排一次，
+          // 见 create 成功分支）。注意**只清定时器、不清 state.transient**：它是渲染态，
+          // `resolveStatus` 在 until 之后本就不再认它，重建后页面拿到的是干净视图。
+          api.timer.clearTimeout(TRANSIENT_TIMER_ID)
           hub.drain({ ok: false, error: TEXT.windowClosed }) // 丢弃该 overlay 的 pending 订阅（D-3/D-8）
           const res = await api.overlay.destroy(OVERLAY_ID)
           if (res && !res.ok) console.warn('[pet] 窗体销毁失败：' + res.error) // 宿主 destroy 幂等，理论路径
@@ -562,7 +641,13 @@ export default function pet(api) {
         // 卡 18（Q16）：真实互动与随机表演**共用 `transient` 字段** ⇒ 这里直接覆盖即可
         // "立即抢占正在播的随机表演"（specs/pet-sprites 的"真实互动可打断随机表演"scenario）；
         // 数值效果由 lib/interact.js 的纯函数照常算出（道具/属性/联动记账），与表演无关。
+        // 卡 19（热修 D-1）：lib/interact.js 的 succeed() 同时把 `transientSelf` 写回 false
+        // ⇒ 入口与页面都知道"这一轮是用户点的"（页面因此不把它折成 idle，动画与气泡同为互动）。
         state = result.state
+        // 卡 19（R54）：为这一轮真实互动排"到期主动推送"——否则页面会按最近一次视图里的
+        // `anim.status`（优先级 9）把进食/洗澡姿态一直渲染到下一次 15 秒 tick。
+        // 覆盖语义由 armTransientExpiry 保证（同一个 id：先清上一轮的，再排这一轮的）。
+        armTransientExpiry(now, state.transient)
         // 先算完再唤醒（D-8）：rev 只在状态落定后 +1，避免把中间态发给页面
         rev++
         syncVitalSettings() // 交互后三属性立即进设置键（设置页 progress 当帧刷新）
@@ -740,6 +825,9 @@ export default function pet(api) {
     // 后者取代了 Q10/Q14 那个一次性 setTimeout 的 pet-trot）
     api.timer.clearInterval(RANDOM_PERF_TIMER_ID)
     api.timer.clearInterval(TICK_ID) // 清结算时钟（无此 id 时宿主无操作，api-reference.md:413）
+    // 卡 19（R54）的第三只定时器：transient 到期推送（一次性 setTimeout）。不清它的话，
+    // 停用后回调仍会在宿主里排队（虽然 disposed 护栏会短路，但句柄必须释放）
+    api.timer.clearTimeout(TRANSIENT_TIMER_ID)
     hub.drain({ ok: false, error: TEXT.windowClosed }) // 丢弃全部 pending 长轮询（任务卡：cleanup 三件事之一）
     offMessage.dispose()
     offSettings.dispose()

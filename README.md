@@ -33,9 +33,10 @@
 | 玩耍 | 心情 +5 | 无 | `running`（原地跑动） |
 | 摸头（点击宠物本体） | 心情 +1 | 无 | `waving` |
 | **拖动**（按住精灵左键移动） | 窗体跟随换位，松手把坐标写进 `state.json`（重启回到该位置） | 无 | 无（移动的是窗体，不切轨） |
-| **随机表演**（自发，非用户触发） | **非打盹时每 10 秒**从 7 项"表演型"动作里随机抽一条**原地**播一轮（约 1.4–1.8s，含 `run-left`/`run-right` 两条侧向原地跑），无气泡；不耗道具、不改任何数值、不推进"入睡"计时 | 无 | `jumping` / `waving` / `running` / `running-left` / `running-right`（各一轮） |
+| **随机表演**（自发，非用户触发） | **非打盹时每 10 秒**从 7 项"表演型"动作里随机抽一条**原地**播一轮（约 1.4–1.8s，含 `run-left`/`run-right` 两条侧向原地跑），无气泡；**播完立即回到呼吸待机**（页面侧锁存 + 看门狗，"一轮 + 500ms"内回落，不等入口下一次推送）；不耗道具、不改任何数值、不推进"入睡"计时 | 无 | `jumping` / `waving` / `running` / `running-left` / `running-right`（各一轮） |
 
 - 摸头有 **5 分钟冷却**（300s）：冷却内点击仍播反馈动画但不加分，气泡为 `摸过头啦，让鲸鱼娘歇口气～`（**不含剩余分钟数**——见下方文案口径）。
+- **互动动画的回落（卡 19 · R54）**：入口在 transient 到期时**主动推送一次**（`pet-transient` 一次性定时器；`api.timer` 只收 1–86400 的整数秒 ⇒ 按 `ceil(该轮时长/1000)` 秒排，并在触发时校验真的到期）。所以点喂食/洗澡/玩耍/摸头后，精灵最迟在**该轮时长 + 1 秒**内回落呼吸/当前基础态（属性过低时回 `hungry`/`dirty`/`sad`），不再等下一次 15 秒结算 tick。自发表演的"播完即回呼吸"另由页面侧锁存（`anim.self` + 看门狗）负责。
 - 道具不足时不扣不改，气泡提示：`没有小鱼干了，多陪我工作一会儿吧～` / `没有沐浴泡泡了，多陪我工作一会儿吧～`。
 - 拖动只响应**鼠标左键**，页面按帧（rAF）合并增量发 `pet.drag{phase,dx,dy}`，入口累加自记坐标后调 `api.overlay.setPosition`；**几何钳位（工作区/任务栏）由宿主兜底并回传钳后坐标**，入口只拒绝 `NaN`/`Infinity`（入口拿不到显示器工作区，自己算不出边界）。拖动期间抑制随机表演与入睡判定、不弹气泡。
 - **随机表演**（增补轮 Q16，取代原"2–5 分钟原地小跑"）：入口用**宿主级** `api.timer.setInterval('pet-perf', 10, …)` 每 **10 秒**从随机集（`eating` / `bathing` / `petted` / `playing` / `trot` / `run-left` / `run-right`，单一来源 `lib/constants.js`）抽一条播**一轮**（时长 = 该轨真实帧时长之和，1.4–1.8s），播完回落判定。**状态指示轨（`hungry`/`dirty`/`sad`）与 `sleep` MUST NOT 参与随机**——随机摆出"饿了/脏了/难过"会与真实数值脱节；**打盹期间不触发**；优先级**低于真实互动**（用户随时可抢占它）、**高于状态指示轨**（只暂时改姿态，不改数值）。副作用为零：不消耗道具、不改任何属性/库存/成长值、不弹气泡、不推进也不重置 `lastInteractAt`。`run-left`(row2)/`run-right`(row1) 只**原地**播帧，**绝不**调 `setPosition`（宠物不位移）。
@@ -88,7 +89,7 @@
 
 ## 安装与调试
 
-- **安装**：扩展管理器工具栏「安装扩展」选 `out/pet-1.0.0.oix`，或把 `.oix` **拖进**扩展管理器视图；安装（含同名覆盖升级）成功后**立即热生效**，无需重启。安装位置 `<userData>/extensions/pet_chenzhi/`（目录名 = `<name>_<author>`）。
+- **安装**：扩展管理器工具栏「安装扩展」选 `out/pet-1.0.1.oix`，或把 `.oix` **拖进**扩展管理器视图；安装（含同名覆盖升级）成功后**立即热生效**，无需重启。安装位置 `<userData>/extensions/pet_chenzhi/`（目录名 = `<name>_<author>`）。
 - **调试（不安装直接加载）**：
 
   ```bash
@@ -105,9 +106,9 @@
 
 ```bash
 npm install        # 构建期依赖（vite + vue + @vitejs/plugin-vue）；运行时零依赖
-npm test           # node --test：170 条测试覆盖 lib/** 纯函数、入口接线与 app/** 的源码断言（零依赖，不装 node_modules 也能跑）
+npm test           # node --test：196 条测试覆盖 lib/** 纯函数、入口接线与 app/** 的源码/纯函数断言（零依赖，不装 node_modules 也能跑）
 npm run build      # 构建 Vue 子应用（app/ → dist/：index.html + assets/*.css + assets/*.js，共约 95 KB = JS 90 KB + CSS 4 KB）
-npm run pack       # 先 build 再打包 → out/pet-1.0.0.oix（带打包清单回读自检，失败即删产物退出非 0）
+npm run pack       # 先 build 再打包 → out/pet-1.0.1.oix（带打包清单回读自检，失败即删产物退出非 0）
 ```
 
 - 校验清单（在 obox 仓库根执行）：`node scripts/validate-manifest.mjs extensions/pet/manifest.json`。
@@ -121,7 +122,7 @@ npm run pack       # 先 build 再打包 → out/pet-1.0.0.oix（带打包清单
 - **目录（递归）**：`dist/`（Vue 子应用构建产物）、`assets/`（精灵图集 + 上游 LICENSE + PROVENANCE）、`lib/`（9 个纯函数模块——入口 `import './lib/…'`，**缺一个都会加载失败**）；
 - **永不进包**：`data/`（扩展运行时数据目录，含 `data/` 的包被安装器以 `forbidden-entry` 直接拒收）、`node_modules/`、`out/`、`.git/`，以及源码 / 规格目录 `openspec/`、`docs/`、`test/`、`app/`；
 - **回读自检**：打包后重新解析产物的 zip 中央目录，断言必需条目齐全（含全部 9 个 `lib/*.js`）、无禁止前缀、`manifest.json` 为根条目、路径全为正斜杠（无反斜杠 / `..` / 空段 / `./`）、条目 ≤10000、解压总量 ≤512MB；任何一条不过 ⇒ 删除产物并退出非 0。
-- 手工复核：`tar -tf out/pet-1.0.0.oix`（`.oix` 就是 zip）。
+- 手工复核：`tar -tf out/pet-1.0.1.oix`（`.oix` 就是 zip）。
 
 ## 已知平台限制（透明窗体）
 
@@ -154,12 +155,12 @@ npm run pack       # 先 build 再打包 → out/pet-1.0.0.oix（带打包清单
 | `lib/*.js` | 9 个纯函数模块（constants / settle / vitals / growth / items / interact / mapping / persist / bridge） | ✓ |
 | `dist/` | `vite build` 产物（overlay 窗体页面；gitignore，pack 时重建） | ✓ |
 | `assets/whale/` | 鲸鱼娘图集（上游原字节）+ `LICENSE` + `pet.json` + `PROVENANCE.md` | ✓ |
-| `app/` | Vue 子应用源码（精灵 / 面板 / 气泡组件、页面侧桥与 `lib/panel.ts` 的面板开合判定） | ✗（源码） |
-| `test/` | `node --test` 单测（170 条：`lib/**` 纯函数 + 入口接线 + `app/**` 源码断言；含 `app/lib/panel.ts` 的面板开合判定与卡 18 的随机表演/图标浮层门禁） | ✗（源码） |
+| `app/` | Vue 子应用源码（精灵 / 面板 / 气泡组件、页面侧桥、`lib/panel.ts` 的面板开合判定、`lib/burst.ts` 的"自发表演播完回落"判定） | ✗（源码） |
+| `test/` | `node --test` 单测（196 条：`lib/**` 纯函数 + 入口接线 + `app/**` 源码/纯函数断言；含 `app/lib/panel.ts` 的面板开合判定、卡 18 的随机表演/图标浮层门禁与卡 19 的 `anim.self` 回落门禁 + R54 到期推送门禁） | ✗（源码） |
 | `openspec/` | 需求容器（proposal / spec delta / design / tasks / 证据） | ✗（规格） |
 | `docs/` | 需求来源文档 | ✗（规格） |
 | `scripts/pack.mjs` | 零依赖打包脚本（白名单收集 + 手写 zip + 回读自检） | ✗（工具） |
-| `out/pet-1.0.0.oix` | 分发包（产物，gitignore，不提交） | — |
+| `out/pet-1.0.1.oix` | 分发包（产物，gitignore，不提交） | — |
 
 ## 素材出处与许可证
 

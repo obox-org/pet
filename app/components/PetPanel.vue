@@ -356,9 +356,16 @@ const growthValue = computed(() => displayGrowth(props.state.growth.value))
   cursor: pointer;
 }
 
+/*
+ * 键盘焦点环：白色 2px（卡 19 / 裁定 **R53**，复验报告 O-2）。
+ * 原先这里是**青色**半透明焦点环——卡 18 / Q17 把三枚图标按钮的焦点环统一成白色时漏掉了它，
+ * 只剩关闭按钮还是青色 ⇒ 同一个面板里两种焦点色看着像两套控件。现在与 `.act:focus-visible`
+ * 逐字一致（同为白色 2px、同样只在 `:focus-visible` 下画，鼠标点按不画环）。
+ * `aria-label` 等可访问属性一律不动（本次只改颜色环）。
+ */
 .close:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.85);
+  box-shadow: 0 0 0 2px #ffffff;
 }
 
 .sync-hint {
