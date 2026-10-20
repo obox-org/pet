@@ -21,18 +21,31 @@
 | 项 | 值 |
 | --- | --- |
 | 仓库 | `obox-org/pet`（扩展仓，master 直推 + tag） |
-| 提交 | 待填（`git log -1` 的 sha 与标题） |
-| tag | `v2.0.0` |
-| release | 待填（release URL + 资产名与大小） |
+| 提交 | **`628aa77`** `feat!: pet v2.0.0（三属性 → 成长值 + 好感值，10 级文本体系）`（88 文件，+9,529 / −2,078） |
+| tag | **`v2.0.0`**（已 push；仓内现有 v1.0.0 / v1.0.1 / v1.0.2 / v2.0.0） |
+| release | **https://github.com/obox-org/pet/releases/tag/v2.0.0**，资产 `pet-2.0.0.oix`（**1,661,747 B**，state=uploaded） |
 
 ## 四、收尾自检
 
 | 项 | 结果 |
 | --- | --- |
-| `npm test` | 286 / 286 pass / 0 fail |
-| `npm run build`（清 `dist/`） | 成功（26 modules） |
-| `vue-tsc --noEmit` | 0 error |
-| `npm run pack` | `out/pet-2.0.0.oix`（18 条目，1,661,747 B，回读自检通过） |
-| `node scripts/validate-manifest.mjs` | 0 error / 0 warning |
-| 依赖安全 | 扩展仓**运行期零依赖**、`package.json` 无 dependencies ⇒ `npm audit` 无对象；宿主仓的 `security:audit` 与 Dependabot 属另一条线（本 change 未改宿主） |
-| `git status` | 待填（提交后应 clean） |
+| `npm test` | ✅ **286 / 286 pass / 0 fail** |
+| `npm run build`（清 `dist/`） | ✅ 成功（26 modules，`index-Bsxlc5_3.css` 4.62 kB / `index-C6rUe7Zg.js` 91.61 kB） |
+| `vue-tsc --noEmit` | ✅ 0 error（零输出） |
+| `npm run pack` | ✅ `out/pet-2.0.0.oix`（18 条目，1,661,747 B，回读自检通过） |
+| `node scripts/validate-manifest.mjs` | ✅ 0 error / 0 warning |
+| 依赖安全 | ✅ 扩展仓**运行期零依赖**（`package.json` 无 `dependencies`，devDeps 仅 vite/vue-tsc/prettier 等）⇒ 无可审计对象；**本次未改宿主**，宿主仓的 `security:audit` 与 Dependabot 属另一条线 |
+| `git status` | ✅ **clean**（提交后 0 行）；HEAD `628aa77`；提交数 8 |
+
+## 五、九步链收尾
+
+| 步 | 产物 |
+| --- | --- |
+| 1 init / 2 grill | `notes/grill.md`（13 问 + Q14–Q16 下钻，12 维度全关闭） |
+| 3 proposal | `proposal.md` + `specs/**`（7 capability、**23 新增 + 4 REMOVED**、**56 scenario**） |
+| 4 design | `design.md`（七节、D-1..D-10、UI 七条硬约束） |
+| 5 validation | `notes/validation.md`（1 严重 → 已裁定；7 普通；4 建议；证据不足已接受） |
+| 6 task | `tasks.md` + `notes/tasks/01..07`（6 实现卡 + 1 修复卡，所有权两两不相交） |
+| 7 dev | `notes/dev.md`（7 张卡回执 + 四项门槛原始输出，含 R57/R58 两处所有权裁定） |
+| 8 check | `notes/check.md`（第 1 轮 1 严重 / 12 普通 / 8 建议；**第 2 轮 S-1 关闭 → 严重 0**） |
+| 9 ship | 本文件 + `docs/spec/UID-20261017104500-宠物成长与好感/` + tag `v2.0.0` + release |
