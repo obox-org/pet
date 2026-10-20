@@ -143,28 +143,32 @@ test('长轮询 · 25s < 宿主 60s 请求超时：常量关系成立，且理�
 
 const T0 = 1_700_000_000_000
 
-test('卡12 · buildView().anim 携带机器可读 status：= resolveStatus 的英文 key，∈ STATUS_TRACK 九键', () => {
-  const base = initialState(T0) // 三属性全满、lastInteractAt = T0 ⇒ idle
+test('卡12 · buildView().anim 携带机器可读 status：= resolveStatus 的英文 key，∈ STATUS_TRACK 八键', () => {
+  const base = initialState(T0) // 无 transient ⇒ idle
   const idleView = buildView(base, T0)
-  // 卡 19 起 anim 多一项来源标记 self：非 transient 状态一律 false（这里三项都是 false）
+  // 卡 19 起 anim 多一项来源标记 self：非 transient 状态一律 false
   assert.deepEqual(idleView.anim, { row: 0, label: '待机', status: 'idle', self: false })
 
-  // 连续 10 分钟无交互 ⇒ sleep：row 仍是 0（idle 行），label 中文'打盹'，status 'sleep'
-  const sleepView = buildView({ ...base, lastInteractAt: T0 - 600_000 }, T0)
-  assert.deepEqual(sleepView.anim, { row: 0, label: '打盹', status: 'sleep', self: false })
-
-  // 瞬时互动同样带对应 key（eating → row 4）；没有 transientSelf 标记 ⇒ self 为 false（不是自发表演）
+  // 瞬时轨同样带对应 key（eating → row 4）；没有 transientSelf 标记 ⇒ self 为 false（不是自发表演）
   const eatingView = buildView({ ...base, transient: { status: 'eating', until: T0 + 1600 } }, T0)
   assert.deepEqual(eatingView.anim, { row: 4, label: '喂食', status: 'eating', self: false })
 
-  // status 恒为 STATUS_TRACK 的键之一（单一来源，页面 knownStatus 只认这九个）
-  for (const view of [idleView, sleepView, eatingView]) {
+  // 入口自发写的同一轨 ⇒ self=true（页面据此决定"播完折回待机"）
+  const selfView = buildView(
+    { ...base, transient: { status: 'eating', until: T0 + 1600 }, transientSelf: true },
+    T0
+  )
+  assert.deepEqual(selfView.anim, { row: 4, label: '喂食', status: 'eating', self: true })
+
+  // status 恒为 STATUS_TRACK 的键之一（单一来源，页面 knownStatus 只认这八个）
+  for (const view of [idleView, eatingView, selfView]) {
     assert.ok(Object.hasOwn(STATUS_TRACK, view.anim.status), `status '${view.anim.status}' ∈ STATUS_TRACK`)
   }
-  // 核心区分度：sleep 与 idle 同为 row 0 但 status 不同（页面慢放 ×1.5 与 Zzz 气泡全靠它）
-  assert.equal(sleepView.anim.row, idleView.anim.row, 'sleep 与 idle 同为 row 0')
-  assert.notEqual(sleepView.anim.status, idleView.anim.status, '但 status 不同：sleep ≠ idle')
-  // 除 anim 增加 status 外，PetStateView 其余形状不动（D-3 契约）；
-  // 卡 17（Q15=B）：卡 15 增补的顶层 `hidden` 已随隐藏功能移除 ⇒ 这里回到五键
-  assert.deepEqual(Object.keys(idleView).sort(), ['anim', 'bubble', 'growth', 'items', 'vitals'])
+  // v2：v1 的 sleep 与 idle 虽同为 row 0，但 sleep 状态已整体删除（design D-10）——
+  // 长时间无交互也不会得到第二个 row 0 的状态，idle 是唯一的基础态
+  const stale = buildView({ ...base, transient: { status: 'sleep', until: T0 + 1600 } }, T0)
+  assert.equal(stale.anim.status, 'idle', '被删除的 sleep 状态不再被认成瞬时轨')
+  // PetStateView 的形状是 v2 的**四键**（v1 的 vitals 与 growth 三件套已删；
+  // 卡 17 增补过的顶层 hidden 也已随隐藏功能移除）
+  assert.deepEqual(Object.keys(idleView).sort(), ['anim', 'bubble', 'items', 'values'])
 })

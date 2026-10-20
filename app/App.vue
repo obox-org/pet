@@ -17,7 +17,7 @@ import { KIND_TO_STATUS, RANDOM_PERF_PERIOD_MS, decideAnimation, isTransient, kn
 import type { PetStatus } from './lib/anim'
 import { burstFallbackMs, entryTrackOf } from './lib/burst'
 import { panelShouldOpen } from './lib/panel'
-import { BUBBLE_MS, DEFAULT_STATE, TEXT, normalizeState, num } from './lib/state'
+import { BUBBLE_MS, DEFAULT_STATE, TEXT, interactDispatch, normalizeState, num } from './lib/state'
 import type { PetStateView } from './lib/state'
 import { FrameClock } from './lib/frameClock'
 
@@ -38,7 +38,12 @@ const RETRY_BACKOFF_MS = 2000
 /** 状态气泡的展示上限：入口可能给一个很远的 until，页面不许因此把气泡挂死 */
 const STATE_BUBBLE_MAX_MS = BUBBLE_MS * 4
 
-type InteractKind = 'feed' | 'bathe' | 'play' | 'pet'
+/**
+ * v2 的合法互动只有三种（入口 `lib/interact.js` 的 `KINDS`）：喂食 / 洗澡 / 点击摸头。
+ * v1 的 `play` 已随"面板只剩两枚图标"删除（specs/pet-interaction R1），
+ * 面板也只可能发出 `feed`/`bathe`（`onPanelInteract` 的入参类型就是这两项）。
+ */
+type InteractKind = 'feed' | 'bathe' | 'pet'
 
 interface Box {
   left: number
@@ -86,7 +91,7 @@ const transient = shallowRef<PetStatus | null>(null)
  */
 let transientIsSelf = false
 /**
- * 入口自发"表演型"动画的**本地锁存**（design D-14 / 用户裁定 Q16：每 10 秒随机一轮，播完回落）。
+ * 入口自发"表演型"动画的**本地锁存**（design D-2 / specs/pet-sprites R1：每 60 秒随机一轮，播完回落）。
  *
  * 入口报一轮自发表演时会一直报到下一次状态推送（最长一个长轮询周期），而一轮只有 1.4–1.8s；
  * 不锁存的话，本地播完一轮后 `decideAnimation` 又读到同一条 ⇒ 原地跑个不停。
@@ -186,10 +191,8 @@ const plan = computed(() => {
   const m = meta.value
   if (!m) return null
   return decideAnimation(m, {
-    vitals: display.value.vitals,
-    // 卡 12（裁定 R14）：优先喂机器可读的 anim.status（页面据此辨识 sleep ⇒ 慢放 ×1.5 + Zzz 气泡，
-    // 卡 15 起还有 trot ⇒ 播一轮即回落且不弹气泡），label（中文）仅作老数据反查兜底；
-    // 显示仍用中文文案（TEXT.sleeping 等），不把英文 key 给用户
+    // 卡 12（裁定 R14）：优先喂机器可读的 anim.status，label（中文）仅作老数据反查兜底；
+    // v2 起状态只剩 idle 与七条表演轨（没有属性轨、没有打盹），页面不再拿三属性做本地判定
     animStatus: entryStatus.value,
     animLabel: display.value.anim.label,
     animRow: entryRow.value,
@@ -200,7 +203,7 @@ const plan = computed(() => {
 
 /**
  * 换轨的判据用"序列化后的键"而不是 plan 对象本身：
- * plan 是 computed，每次状态回包都会产生新对象，直接 watch 会让 idle 动画每 15s 被打回第 0 帧。
+ * plan 是 computed，每次状态回包都会产生新对象，直接 watch 会让 idle 动画每 60s 被打回第 0 帧。
  */
 const planKey = computed(() => {
   const p = plan.value
@@ -299,7 +302,7 @@ function startTransient(status: PetStatus, self = false): void {
   const round = p && p.status === status ? p.total : null
   // 兜底：页面不可见时帧时钟停摆、onCycleEnd 不会来，靠这个定时器保证动画不会永久卡住。
   // 时刻固定为"该轨一轮 + 既有 slack"，**不依赖入口的下一次推送**——入口的 transient 到期
-  // 既不 rev++ 也不推送，等下一次 15s tick 就是 D-1 实机看到的 5/10/15s 停留。
+  // 既不 rev++ 也不推送，等下一次 60s 结算 tick 就是 D-1 实机看到的 5/10/15s 停留。
   transientTimer = setTimer(() => {
     if (transientIsSelf) latchBurst()
     transient.value = null
@@ -312,16 +315,16 @@ function startTransient(status: PetStatus, self = false): void {
  * 收到一份**新的**入口状态（首帧 / rev 变化 / 看门狗补拉）时同步"入口自发表演"的本地一轮。
  *
  * 为什么挂在状态收包（applyState）上、而不是 `watch(display.value.anim.status)`：
- * 入口每 10 秒随机抽一条，**连着两轮抽到同一条**时状态字符串没有变化，watch 根本不会触发
+ * 入口每 60 秒随机抽一条，**连着两轮抽到同一条**时状态字符串没有变化，watch 根本不会触发
  * ⇒ 那一轮会被吞掉。收包是"入口又报了一次"的唯一可靠信号（rev 变了才会走到这里）。
  *
  * 判据是入口给的 `anim.self`（**不是**状态字符串：随机集里 eating/bathing/petted/playing 四项
  * 与真实互动同名同轨，字符串无从区分——卡 18 的 `isSelfBurst` 只能认三条同构轨，这就是 D-1 的根因）：
- * - `self !== true`（真实互动 / 普通状态 / 打盹 / 拖动中折出来的 idle）⇒ 清锁存，交回状态驱动
+ * - `self !== true`（真实互动 / 普通待机 / 拖动中折出来的 idle）⇒ 清锁存，交回状态驱动
  *   （真实互动那一轮由 `interact()` 自己起，`anim.self=false` 保证它不会被折成 idle）；
  * - `self === true` 且 status 是表内合法状态轨（`knownStatus` 守门，畸形回包不许起一轮）：
  *   全新的一条、或上一轮已经播完（锁存中）⇒ 起一轮（`self=true`）；
- *   同一轮里的重复推送（15s tick 恰好落在这一轮内）⇒ 不重起，否则动画会被打回第 0 帧；
+ *   同一轮里的重复推送（结算 tick 恰好落在这一轮内）⇒ 不重起，否则动画会被打回第 0 帧；
  * - `force`：看门狗补拉到权威状态时用——入口此刻还在报这条自发表演，就当作新一轮重播。
  */
 function syncBurst(anim: { status: string; self: boolean }, force = false): void {
@@ -338,12 +341,12 @@ function syncBurst(anim: { status: string; self: boolean }, force = false): void
 }
 
 /**
- * 锁存看门狗（周期 = 入口的随机表演周期 `RANDOM_PERF_PERIOD_MS` = 10 秒）。
+ * 锁存看门狗（周期 = 入口的随机表演周期 `RANDOM_PERF_PERIOD_MS` = 60 秒）。
  *
- * 锁存的本意是"入口还在报这条 burst、但这一轮已经播完 ⇒ 先按 idle 渲染"，而入口每 10 秒
+ * 锁存的本意是"入口还在报这条 burst、但这一轮已经播完 ⇒ 先按 idle 渲染"，而入口每 60 秒
  * 必然推一次新 rev（随机表演的排程在入口）。所以"锁存后整整一个周期都没等到任何新状态"
- * 只可能是推送断了（打盹不再表演 / 窗体停用 / 桥断）——此时主动补拉一次权威状态再解锁，
- * 免得画面钉在锁存后的 idle 上（例如它其实已经打盹了）。
+ * 只可能是推送断了（窗体停用 / 桥断 / 页面被切走）——此时主动补拉一次权威状态再解锁，
+ * 免得画面钉在锁存后的 idle 上（入口可能已经进入别的状态）。
  */
 function armBurstWatchdog(): void {
   clearTimer(burstWatchdog)
@@ -365,6 +368,12 @@ async function resyncBurst(): Promise<void> {
 }
 
 // ---- 气泡 ----
+/**
+ * 气泡时长一律 `BUBBLE_MS`（**4000ms**，specs/pet-interaction R5）。页面与入口是两套构建，
+ * 常量镜像在 `app/lib/state.ts`（入口单一来源是 `lib/constants.js` 的 `BUBBLE_MS`，
+ * 两侧逐值相等由 `test/view-v2.test.js` 钉住）：入口负责权威到期（清 `speech` 并推送），
+ * 页面这条本地定时器负责"到点一定消失"，界面不留残余。
+ */
 function activeInteractionBubble(): boolean {
   const current = bubble.value
   return !!current && current.interaction && current.until > Date.now()
@@ -380,8 +389,6 @@ function showBubble(text: unknown, tone: 'good' | 'bad', ms: number, interaction
     () => {
       bubble.value = null
       bubbleTimer = 0
-      // 气泡让位结束后补上被打断的打盹提示（见 maybeShowSleepHint）
-      maybeShowSleepHint()
     },
     Math.max(0, until - Date.now())
   )
@@ -405,31 +412,11 @@ function applyState(raw: unknown, forceBurst = false): void {
 }
 
 /**
- * 打盹提示（design D-4：sleep 的"Zzz"由气泡/面板文字表达，上游图集没有 sleep 轨）。
- *
- * 为什么不是"进入 sleep 就无脑弹一条"：互动反馈优先于状态气泡（design D-7），
- * 用户刚摸完头就入睡的话，那条互动气泡还占着位置。所以这里只做"该显示但被占位时记下欠账"，
- * 等气泡自然消失（showBubble 的到期回调）再补一次；`sleepHintShown` 保证一次打盹只提示一遍。
+ * v1 的打盹提示（睡眠状态下补一句"Zzz"气泡、及其占位欠账）随 design D-10 整段删除：
+ * v2 没有睡眠状态、没有"连续多久无交互"的计时、也没有任何长时间无交互的表现
+ * （specs/pet-sprites R2：宠物 MUST NOT 进入睡眠状态，也 MUST NOT 有睡眠相关的任何表现）。
+ * 气泡只剩三种来源：互动反馈（页面本地）、入口给的定时文本、入口给的拒绝提示。
  */
-let sleepHintShown = false
-
-function maybeShowSleepHint(): void {
-  if (sleepHintShown) return
-  if (plan.value?.status !== 'sleep') return
-  const current = bubble.value
-  if (current && current.until > Date.now()) return
-  sleepHintShown = true
-  showBubble(TEXT.sleeping, 'good', BUBBLE_MS, false)
-}
-
-// 离开打盹态就把"已提示过"清掉，下次再睡还能提示一次
-watch(
-  () => plan.value?.status,
-  (status) => {
-    if (status === 'sleep') maybeShowSleepHint()
-    else sleepHintShown = false
-  }
-)
 
 // ---- 状态同步：首帧拉一次 + 长轮询订阅 ----
 async function fetchInitial(): Promise<void> {
@@ -478,30 +465,47 @@ async function subscribeLoop(): Promise<void> {
 }
 
 // ---- 交互 ----
+/**
+ * 一次互动（喂食 / 洗澡 / 点击摸头）。
+ *
+ * **卡 4 明确移交的坑（本卡的核心接线）**：入口对三种"拒绝"返回的是 `{ ok:false, reason, ... }`
+ * ——共享冷却 `cooling`、道具不足 `no-item`、点击冷却 `pet-cooling`。它们 `ok:false`
+ * 但**不是错误**：都带一句用户可见的 `feedback.text`（tone='bad'）、状态一个字节都没改，
+ * 而且点击冷却还要照播摸头动画（specs/pet-interaction R5）。
+ * **只有 `unknown-kind` 才是错误路径**（D-9：不弹气泡、只记诊断）。
+ *
+ * 所以这里**不能**沿用 v1 的 `unwrap()`——它把所有 `data.ok === false` 一律当错误抛掉，
+ * 会让"冷却中/没有道具"退化成一句通用报错。分流交给纯函数 `interactDispatch`
+ * （app/lib/state.ts，`node --test` 真跑覆盖四种 reason 与本文件的接线）。
+ */
 async function interact(kind: InteractKind): Promise<void> {
   if (!bridge || stopped) return
-  // 摸头：冷却内的点击也 MUST 播反馈动画（specs/pet-interaction）⇒ 不等回包就先播。
+  // 摸头：冷却内的点击也 MUST 播反馈动画（specs/pet-interaction R5）⇒ 不等回包就先播。
   // 卡 19：真实互动起的都是 `self=false` 的轮次（默认值）——它们**不会**被锁存折成 idle，
   // 因此"随机表演期间点互动"必然是"气泡与动画同为互动"，不会出现"气泡还在、动画已切"。
   if (kind === 'pet') startTransient('petted')
   const res = await bridge.request('pet.interact', { kind }, REQUEST_TIMEOUT_MS)
   if (stopped) return
-  const { ok, data, error } = unwrap(res)
-  if (!ok) {
-    showBubble(error || TEXT.missing[kind] || TEXT.genericError, 'bad', BUBBLE_MS, true)
+  // 桥层失败（页面侧超时 / 窗体已关 / 回包为空）才是"请求没送到"：这时候说一句通用报错
+  if (!res.ok) {
+    showBubble(res.error || TEXT.genericError, 'bad', BUBBLE_MS, true)
     return
   }
-  if (kind !== 'pet') startTransient(KIND_TO_STATUS[kind])
-  if (data && data.state !== undefined) applyState(data.state)
-  const feedback = isRecord(data?.feedback) ? data.feedback : undefined
-  // 回包缺 text 时的兜底：摸头的 tone='bad' 只可能是"冷却内又摸了一次"这一种情形，
-  // 所以那句兜底按 tone 区分（否则会把冷却误报成"摸头成功"，D-16 的两句是不同的话）
-  const fallback = kind === 'pet' && feedback?.tone === 'bad' ? TEXT.petCooling : TEXT.feedback[kind]
-  const text = typeof feedback?.text === 'string' && feedback.text !== '' ? feedback.text : fallback
-  showBubble(text, feedback?.tone === 'bad' ? 'bad' : 'good', BUBBLE_MS, true)
+  const data = isRecord(res.data) ? res.data : {}
+  const reply = interactDispatch(data, kind)
+  // 回包里带视图就落定（拒绝分支同样带：`rev++` 之后入口已经把新视图推来了，先吃掉这一份更跟手）
+  if (reply.accepted && kind !== 'pet') startTransient(KIND_TO_STATUS[kind])
+  if (data.state !== undefined) applyState(data.state)
+  // `unknown-kind`（含旧载荷的 play/summon/hide）：错误路径 —— 不弹气泡，只留一条诊断日志
+  // （入口自己已把"未知互动: xxx"写进设置页的诊断位，D-9）。
+  if (reply.path === 'error') {
+    console.warn('[pet] 互动未被受理：' + reply.text)
+    return
+  }
+  showBubble(reply.text, reply.tone, BUBBLE_MS, true)
 }
 
-function onPanelInteract(kind: 'feed' | 'bathe' | 'play'): void {
+function onPanelInteract(kind: 'feed' | 'bathe'): void {
   void interact(kind)
 }
 
@@ -524,7 +528,7 @@ function onSpriteKeydown(event: KeyboardEvent): void {
   }
   if (event.key === 'Tab' && !event.shiftKey && !panelOpen.value) {
     // Esc 关掉面板后焦点仍在精灵上；此时 Tab 必须能重新进面板，
-    // 否则 design 承诺的 Tab 顺序（精灵 → 喂食 → 洗澡 → 玩耍 → 关闭面板）在键盘路径上断在这里
+    // 否则 design 承诺的 Tab 顺序（精灵 → 喂食 → 洗澡 → 关闭面板）在键盘路径上断在这里
     event.preventDefault()
     openPanelByFocus()
   }
@@ -696,7 +700,7 @@ function onSpritePointerDown(event: PointerEvent): void {
   } catch {
     // 捕获失败（指针已被别处捕获等）不影响拖动本身，只是快速甩动时可能少收几帧增量
   }
-  // 入口据此记 dragging=true：抑制 trot 触发与 sleep 推进、不弹气泡（D-13 互斥）
+  // 入口据此记 dragging=true：抑制随机表演触发、不弹气泡（D-13 互斥）
   void bridge?.request('pet.drag', { phase: 'start' }, REQUEST_TIMEOUT_MS)
   syncInside() // 拖动一开始就锁"命中"，别让抖动出的 inside:false 把穿透打开（见 syncInside 注释）
 }
@@ -995,11 +999,16 @@ onMounted(async () => {
   touch-action: none;
 }
 
-/* 焦点环用色值表给的 box-shadow；outline 被替代而不是被抹掉（design UX 节） */
+/*
+ * 精灵的键盘焦点环：**白色 2px**（design `## UI 视觉规范` 的"焦点环 = 白色 2px"，与面板两枚图标、
+ * 关闭按钮逐字同一份口径）。v1 这里是一圈青色（`rgba(56,189,248,.85)`）——那是**自造色值**，
+ * 与本 change 的硬约束 1（CSS 里只有 `var(--…)`；白色只出现在图标描边与焦点环）冲突，已改白。
+ * `outline` 被替代而不是被抹掉（design UX 节：焦点必须可见）。
+ */
 .sprite:focus-visible {
   outline: none;
   border-radius: 16px;
-  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.85);
+  box-shadow: 0 0 0 2px #ffffff;
 }
 
 /*
@@ -1037,18 +1046,21 @@ onMounted(async () => {
   gap: 8px;
 }
 
+/*
+ * 图集加载失败的占位（design D-9）：只画一个灰圆 + 一行次要色文字，**绝不白屏**。
+ * 两者都用宿主 token（`--hover-bg` / `--fg-dim` / `--font-size-sm`）——v1 这里是两组 rgba
+ * 自造色值 + 一层深色 text-shadow，违反"零自造色值"（design 硬约束 1），已换成 token。
+ */
 .fallback-dot {
   width: 96px;
   height: 96px;
   border-radius: 999px;
-  background: rgba(148, 163, 184, 0.35);
+  background: var(--hover-bg);
 }
 
 .fallback-text {
-  color: rgba(226, 232, 240, 0.72);
-  font-size: 12px;
-  /* 桌面壁纸可能是浅色，加一层深色投影保证文案可读（颜色仍取自面板色值表） */
-  text-shadow: 0 1px 2px rgba(15, 23, 42, 0.9);
+  color: var(--fg-dim);
+  font-size: var(--font-size-sm);
 }
 
 /* design 动效节：面板淡入 120ms、气泡淡出；减少动效偏好下不做过渡 */

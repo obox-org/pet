@@ -20,6 +20,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import pet from '../index.js'
 import {
+  INTERACT_COOLDOWN_MS,
   RANDOM_PERF_SET,
   RANDOM_PERF_TIMER_ID,
   TICK_ID,
@@ -34,35 +35,23 @@ import { flush, makeApi } from './helpers/mock-api.js'
 
 const T0 = 1_700_000_000_000
 
-/** 四种真实互动 → 该轮的动画轨（与 lib/interact.js 的 succeed 分支逐字同值） */
+/** 三种真实互动 → 该轮的动画轨（与 lib/interact.js 的 succeed 分支逐字同值） */
 const INTERACTIONS = [
   ['feed', 'eating'],
   ['bathe', 'bathing'],
-  ['play', 'playing'],
   ['pet', 'petted']
 ]
-/** 属性过低时，到期应回落到的"真实基础态"（喂食/洗澡/玩耍各挑一个低于阈值的属性） */
-const LOW_CASES = [
-  ['feed', 'eating', { hunger: 10 }, 'hungry'],
-  ['bathe', 'bathing', { clean: 10 }, 'dirty'],
-  ['play', 'playing', { mood: 10 }, 'sad']
-]
 
-/** 合法 v1 存档文本（字段可覆盖） */
+/** 合法存档文本（v2 字段集，可按用例覆盖） */
 function saveText(overrides = {}) {
   return JSON.stringify({
     schemaVersion: 1,
-    hunger: 100,
-    clean: 100,
-    mood: 100,
     fish: 3,
     bubble: 3,
     growth: 0,
-    hungerDropAcc: 0,
-    cleanDropAcc: 0,
-    recoverAcc: 0,
-    afkAcc: 0,
-    lastSettledAt: T0,
+    favor: 0,
+    lastGrowthAt: T0,
+    lastAfkAt: T0,
     lastPetAt: 0,
     position: null,
     ...overrides
@@ -146,12 +135,14 @@ test('卡19 R54 · 到期校验（纯函数）：与 resolveStatus 互补；无 
   assert.equal(transientExpired(null, T0), false, 'state 缺失 ⇒ false')
 })
 
-// ————— ① ② 参数化：四种真实互动各自排期望秒数的定时器；到期恰好推一次 + 回落基础态 —————
+// ————— ① ② 参数化：三种真实互动各自排期望秒数的定时器；到期恰好推一次 + 回落基础态 —————
 
-test('卡19 R54 · 四种真实互动：各自排期望秒数的到期定时器；到期恰好推一次 rev 且视图回落基础态', async (t) => {
+test('卡19 R54 · 三种真实互动：各自排期望秒数的到期定时器；到期恰好推一次 rev 且视图回落基础态', async (t) => {
   const { rec, cleanup, now, advance, expiry, currentRev } = activate(t)
   await flush()
   for (const [kind, status] of INTERACTIONS) {
+    // 喂食/洗澡共享 10 分钟冷却 ⇒ 每次循环先让冷却到期（也顺带避开"上一轮还在播"）
+    advance(INTERACT_COOLDOWN_MS)
     const r = await rec.send('pet.interact', { kind })
     assert.equal(r.ok, true, `${kind} 成功`)
     assert.equal(r.state.anim.status, status, `${kind} ⇒ ${status} 轨`)
@@ -198,27 +189,10 @@ test('卡19 R54 · 四种真实互动：各自排期望秒数的到期定时器�
   cleanup()
 })
 
-// 每种"属性过低"单独一条 test：`activate` 会给**每个测试上下文**挂一次 Date.now 的 mock，
-// 同一条测试里反复 activate 会撞上"同一方法被 mock 两次"（Node 的 mock tracker 按上下文记账）
-for (const [kind, status, low, fallback] of LOW_CASES) {
-  test(`卡19 R54 · 属性过低时的到期回落：${kind} ⇒ ${fallback}（而不是 idle）`, async (t) => {
-    const { rec, cleanup, advance, expiry } = activate(t, { files: { 'state.json': saveText(low) } })
-    await flush()
-    const before = (await rec.send('pet.state')).state
-    assert.equal(before.anim.status, fallback, `基线就是 ${fallback}`)
-    const r = await rec.send('pet.interact', { kind })
-    assert.equal(r.state.anim.status, status, '播放中优先显示互动轨')
-    const timer = expiry()
-    assert.ok(timer, '排了到期推送')
-    advance(TRANSIENT_MS[status]) // 把假时钟推到 until（宿主定时器到期时真实时钟就是这个样子）
-    timer.cb()
-    await flush(2)
-    const after = (await rec.send('pet.state')).state
-    assert.equal(after.anim.status, fallback, `到期 ⇒ 回落真实基础态 ${fallback}（不是 idle）`)
-    assert.equal(after.anim.self, false, '到期视图不是自发表演')
-    cleanup()
-  })
-}
+// ⚠️ v1 这里还有一组"属性过低时的到期回落（⇒ hungry/dirty/sad）"的用例。它们钉的是
+// 三属性阈值驱动的负面姿态，而三属性体系已随 `specs/pet-vitals` 的 4 条 REMOVED 整体删除
+// （design D-10）⇒ v2 的到期回落**只有 idle 一个基础态**，上面那条参数化用例已经逐 kind
+// 覆盖了"到期 ⇒ 视图回落基础态"。因此这组用例按已删除的能力删除，而不是改写成"回落饿态"。
 
 // ————— ③ 覆盖：先清后设，只留一个 —————
 
@@ -231,7 +205,8 @@ test('卡19 R54 · 新一轮覆盖：先清后设（任何时刻至多一个）�
   assert.deepEqual(expiryOps(), ['clearTimeout', 'setTimeout'], '第一次 arm = 先清（无旧定时器也调用）后设')
 
   advance(200) // 让两轮的 until 不同，便于验证"旧回调被替换"
-  await rec.send('pet.interact', { kind: 'play' }) // playing 1500ms ⇒ 覆盖上一轮
+  // 用「点击摸头」覆盖：它与喂食**不共享**冷却（点击是独立的 1 小时冷却），所以立刻就能成功
+  await rec.send('pet.interact', { kind: 'pet' }) // petted 1400ms ⇒ 覆盖上一轮
   const second = expiry()
   assert.notEqual(second, first, '旧的到期定时器已被替换（只留一个）')
   assert.deepEqual(
@@ -244,11 +219,11 @@ test('卡19 R54 · 新一轮覆盖：先清后设（任何时刻至多一个）�
   const revBefore = await currentRev()
   first.cb()
   await flush(2)
-  assert.equal((await rec.send('pet.state')).state.anim.status, 'playing', '新一轮仍在播（旧回调没有误清）')
+  assert.equal((await rec.send('pet.state')).state.anim.status, 'petted', '新一轮仍在播（旧回调没有误清）')
   assert.equal(await currentRev(), revBefore, '旧回调早到 ⇒ 不推 rev')
 
   // 真正到期 ⇒ 恰好一次推送
-  advance(TRANSIENT_MS.playing)
+  advance(TRANSIENT_MS.petted)
   expiry().cb()
   await flush(2)
   assert.equal((await rec.send('pet.state')).state.anim.status, 'idle', '到期 ⇒ 回落')
@@ -288,10 +263,10 @@ test('卡19 R54 · 时钟早到（未到期触发）⇒ 不清 transient、不�
 
 // ————— ④ 清理：窗体销毁 / 重建补排 / cleanup —————
 
-test('卡19 R54 · 清理：窗体销毁清掉到期定时器（pet-tick/pet-perf 不受影响）、重建按剩余时间补排、cleanup 三只全清', async (t) => {
+test('卡19 R54 · 清理：窗体销毁清掉五只定时器（含到期推送）、重建全部补挂并按剩余时间补排、cleanup 全清', async (t) => {
   const { api, rec, cleanup, advance, expiry } = activate(t)
   await flush()
-  await rec.send('pet.interact', { kind: 'play' })
+  await rec.send('pet.interact', { kind: 'feed' })
   assert.ok(expiry(), '互动后挂着到期定时器')
 
   // 窗体销毁（toggle 关）
@@ -299,24 +274,30 @@ test('卡19 R54 · 清理：窗体销毁清掉到期定时器（pet-tick/pet-per
   await flush()
   assert.equal(rec.overlays.size, 0, '窗体已销毁')
   assert.equal(rec.timers.has(TRANSIENT_TIMER_ID), false, '窗体销毁 ⇒ 到期定时器被清')
-  assert.ok(rec.timers.has(TICK_ID), '结算时钟不受窗体销毁影响（D-5 既有口径）')
-  assert.ok(rec.timers.has(RANDOM_PERF_TIMER_ID), '随机表演周期不受窗体销毁影响')
+  // v2 的定时器跟着窗体生命周期走（design D-3 的"清理"列）：pet-tick / pet-perf / pet-text
+  // 也由 stopClocks 一并清掉，关窗期间不再空转（v1 曾让它们常驻）
+  for (const id of [TICK_ID, RANDOM_PERF_TIMER_ID, 'pet-text']) {
+    assert.equal(rec.timers.has(id), false, `窗体销毁 ⇒ ${id} 同样被清`)
+  }
+  assert.equal(rec.timers.size, 0, '销毁后没有任何定时器残留')
 
-  // 重建（这一轮还没到期）⇒ 补排一次，到期照常清 + 推
+  // 重建（这一轮还没到期）⇒ 三只周期定时器补挂 + 到期推送按剩余时间补排
   api.settings.set('pet.visible', true)
   await flush()
   assert.equal(rec.overlays.size, 1, '窗体已重建')
+  assert.ok(rec.timers.has(TICK_ID), '重建后 pet-tick 补挂')
+  assert.ok(rec.timers.has(RANDOM_PERF_TIMER_ID), '重建后 pet-perf 补挂')
   assert.ok(rec.timers.has(TRANSIENT_TIMER_ID), '重建时 transient 未到期 ⇒ 补排到期推送')
-  advance(TRANSIENT_MS.playing)
+  advance(TRANSIENT_MS.eating)
   expiry().cb()
   await flush(2)
   assert.equal((await rec.send('pet.state')).state.anim.status, 'idle', '补排的那次同样能正常落到基础态')
 
-  // cleanup：pet-tick / pet-perf / pet-transient 三只都要清
-  await rec.send('pet.interact', { kind: 'feed' })
+  // cleanup：五只定时器（三只周期 + 气泡 + 到期推送）全清
+  await rec.send('pet.interact', { kind: 'bathe' })
   assert.ok(expiry(), 'cleanup 前确实挂着一只')
   cleanup()
-  assert.equal(rec.timers.size, 0, 'cleanup 把三只定时器都清了（含 pet-transient）')
+  assert.equal(rec.timers.size, 0, 'cleanup 把定时器都清了（含 pet-transient）')
   assert.equal(rec.timerLog.at(-1)[0], 'clearTimeout', '最后一次定时器操作是清到期推送')
 })
 
@@ -390,30 +371,32 @@ test('卡19 R54 · 自发表演同样排到期推送，且 anim.self 语义不�
 
 // ————— 源码接线门禁（防后人把定时器接回"等下一次 tick"） —————
 
-test('卡19 R54 · 接线门禁：arm 定义 1 + 调用 4（自发/互动/重建/早到重排）、clear 3 处，且到期推送不写盘', () => {
+test('卡19 R54 · 接线门禁：arm 定义 1 + 调用 4（自发/互动/重建/早到重排）、clear 2 处，且到期推送不写盘', () => {
   const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
   assert.equal(
     (src.match(/armTransientExpiry\(/g) ?? []).length,
     5,
     '定义 1 处 + 调用 4 处（onRandomPerf / interact / create 重建 / 到期回调的早到重排）'
   )
+  // v2 起 clear 只剩 2 处：`armTransientExpiry` 内部的先清后设 + `stopClocks`（窗体销毁与 cleanup
+  // 共用同一个挂摘点，所以不再各写一遍）
   assert.equal(
     (src.match(/api\.timer\.clearTimeout\(TRANSIENT_TIMER_ID\)/g) ?? []).length,
-    3,
-    'clear 3 处（arm 内部先清 + 窗体销毁 + cleanup）'
+    2,
+    'clear 2 处（arm 内部先清 + stopClocks 单一挂摘点）'
   )
   assert.equal(
     (src.match(/api\.timer\.setTimeout\(TRANSIENT_TIMER_ID/g) ?? []).length,
     1,
     '只有一处真正 setTimeout（都走 armTransientExpiry，口径单点）'
   )
-  const expire = src.slice(src.indexOf('function onTransientExpire()'), src.indexOf('function onRandomPerf()'))
-  // 三件事：清字段 → rev++ → 唤醒；**不得**有设置同步或写盘（到期不改任何数值）
+  const expire = src.slice(src.indexOf('function onTransientExpire()'), src.indexOf('function bubbleDelaySeconds'))
+  // 三件事：清字段 → rev++ → 唤醒；**不得**写盘（到期不改任何数值）
   assert.match(expire, /transientExpired\(state, now\)/, '先校验真的到期（防早触发/时钟回拨）')
   assert.match(expire, /transient: null, transientSelf: false/, '清 transient 与来源标记')
   assert.match(expire, /rev\+\+/, 'rev+1（D-8 次序）')
   assert.match(expire, /hub\.wake\(\)/, '唤醒长轮询推送')
-  assert.equal(/persistState|syncVitalSettings/.test(expire), false, '到期推送不写盘、不写设置键（数值没变）')
+  assert.equal(/persistState/.test(expire), false, '到期推送不写盘（数值没变，写盘签名也不含 transient）')
   assert.match(expire, /if \(disposed \|\| !state\) return/, '停用/未就绪时短路')
 })
 

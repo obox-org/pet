@@ -1,15 +1,21 @@
 /**
- * 卡 15 · 文案口径（design **D-16 文案总表** + 增补 Q12/Q13；specs/pet-interaction 的文案 requirement）。
+ * 卡15 · 文案口径（design D-16 / D-9；specs/pet-favor R4「文本 MUST NOT 含数字或时长单位」）。
  *
- * 覆盖任务卡验收 ④ 的文案条目：
+ * ⚠️ 本文件是 v1 用例的改写：v1 的文案表里有 `playOk`（玩耍成功）、`sleeping`（打盹提示）、
+ * `feedCooling`（喂食冷却）三条——它们分别指向**已删除的能力**（`play` kind、打盹机制、
+ * 喂食不设冷却），已随本卡（R58）从 `lib/constants.js` 的 `TEXT` 中物理删除。
+ * 同时 v1 的 2600ms 气泡与"三枚图标"也已被 4 秒气泡与两枚图标取代。
+ *
+ * 覆盖：
  * - **两条正则硬规则**对文案表全量扫描 0 命中：`/\d+\s*(分钟|秒|小时)/`（禁数字时间）与
- *   `/[+-]\d+/`（禁属性增量数字）——specs/pet-interaction 的"文案表全量扫描"scenario 逐字；
- * - **五句上游逐字**断言（字符串硬编码在本文件里，出处注明上游 `affinity.ts` / `ledger.ts`）；
- * - D-16 总表其余四条（无泡泡 / 洗澡 / 玩耍 / 打盹）同样逐字钉住；卡 17（Q15=B）起召唤胶囊那句
- *   已从文案表删除 ⇒ 这里改为**负向断言**（`TEXT` 不含 `summon`/`hiddenBlocked`）；
- * - `interact()` 的返回值真的用的就是这些文案（表与逻辑不脱节）；
- * - 页面侧 `app/lib/state.ts` 的同名文案与入口一致（两套构建无法共享模块 ⇒ 源码级对齐）；
- * - 被 Q12 废止的旧文案在 `lib/**`、`app/**`、`index.js`、`README.md` 里**一处都不剩**。
+ *   `/[+-]\d+/`（禁属性增量数字）；
+ * - 与上游 dsh-pet **逐字一致**的四句（`petOk` / `feedOk` / `noFish`，以及页面兜底里的
+ *   冷却句）；自拟两句（`batheOk` / `noBubble`）同样逐字钉住；
+ * - **字数口径**：v2 的 120 条等级文本 + 8 条冷却文本由 `test/texts.test.js` 逐条扫描，
+ *   本文件只钉"表里的运行时文案"；
+ * - `interact()` 的返回值真的用这些文案（表与逻辑不脱节），且未知 kind 不带气泡文案；
+ * - 页面侧 `app/lib/state.ts` 的兜底文案与入口同文（两套构建无法共享模块 ⇒ 源码级对齐）；
+ * - 被废止的旧文案在 `lib/**`、`app/**`、`index.js`、`README.md` 里**一处都不剩**。
  *
  * R12（上游文案漂移）：这些断言就是"钉住逐字值"的门禁——上游改了文案不会自动跟随，
  * 跟随属新 change（必须回 design D-16 改表再来改这里）。
@@ -21,6 +27,7 @@ import { fileURLToPath } from 'node:url'
 import { STATUSBAR_IDLE, TEXT } from '../lib/constants.js'
 import { interact } from '../lib/interact.js'
 import { initialState } from '../lib/settle.js'
+import { COOLING_TEXTS } from '../lib/texts.js'
 
 const extRoot = fileURLToPath(new URL('..', import.meta.url))
 const T0 = 1_700_000_000_000
@@ -31,30 +38,26 @@ const TIME_RE = /\d+\s*(分钟|秒|小时)/
 const DELTA_RE = /[+-]\d+/
 
 /**
- * 五句**与上游 dsh-pet 逐字一致**的文案（design D-16 表的"来源/约束"列标 ★ 的那五条）。
+ * 与上游 dsh-pet **逐字一致**的文案（design D-16 表里标 ★ 的那几条）。
  * 字符串硬编码在测试里是任务卡的明确要求：只有硬编码才能证明"表被改错时测试会红"，
  * 若从 TEXT 反向取值就变成同义反复。
  */
 const UPSTREAM_VERBATIM = {
-  // 上游 `affinity.ts`（摸头/喂食的反应文案；design D-16 第 1–4 行）
-  petOk: '咕噜咕噜～被摸摸好舒服！',
-  petCooling: '摸过头啦，让鲸鱼娘歇口气～',
-  feedOk: '呜哇！小鱼干好好吃！',
-  feedCooling: '吃饱啦，晚点再喂～',
-  // 上游 `ledger.ts`（道具不足；design D-16 第 5 行）
-  noFish: '没有小鱼干了，多陪我工作一会儿吧～'
+  petOk: '咕噜咕噜～被摸摸好舒服！', // 上游 affinity.ts
+  feedOk: '呜哇！小鱼干好好吃！', // 上游 affinity.ts
+  noFish: '没有小鱼干了，多陪我工作一会儿吧～' // 上游 ledger.ts
 }
 
-/** D-16 总表里非上游逐字的自拟/仿写句（同样逐字钉住，防"顺手改文案"） */
+/** 自拟/仿写的两句（同样逐字钉住，防"顺手改文案"） */
 const OWN_VERBATIM = {
   noBubble: '没有沐浴泡泡了，多陪我工作一会儿吧～', // 仿上游 ledger.ts 句式（上游无洗澡玩法）
-  batheOk: '泡泡好舒服～洗干净啦！', // 本轮自拟（Q13：去掉属性增量数字）
-  playOk: '玩得好开心！', // 本轮自拟（Q13）
-  sleeping: '打盹中（Zzz）' // 保留（D-4：上游图集无 sleep 轨，Zzz 由文字表达）
+  batheOk: '泡泡好舒服～洗干净啦！'
 }
 
-/** 被 Q12/Q13 连带废止的旧文案（含数字时间或属性增量数字）⇒ 源码里一处都不该剩（连注释也不留，
- *  这样"产物不含 `还需`"这条验收就不只是"构建恰好没打进去"，而是源码级为零） */
+/** 页面兜底用的冷却句（上游 affinity.ts 逐字；入口只在"点击冷却"时从 8 条冷却文本里取样） */
+const PET_COOLING_VERBATIM = '摸过头啦，让鲸鱼娘歇口气～'
+
+/** 被废止/已删除的旧文案 ⇒ 源码里一处都不该剩（连注释也不留） */
 const RETIRED = [
   '没有小鱼干了（挂机 20 分钟可得 1 条）',
   '没有沐浴泡泡了（挂机 20 分钟可得 1 个）',
@@ -63,7 +66,10 @@ const RETIRED = [
   '好开心（心情 +5）',
   '再摸也不会更开心啦',
   '还需',
-  '挂机 20 分钟' // 旧文案的片段；连注释都不留（"20 分钟"这个数值只以 AFK_PERIOD_SEC 常量与机制说明的形式存在）
+  '挂机 20 分钟', // 旧文案的片段（数值只以 AFK_PERIOD_SEC 常量与机制说明的形式存在）
+  '打盹中', // v2 不再有打盹提示（design D-10）
+  '玩得好开心', // v1 的 playOk（`play` kind 已删除）
+  '吃饱啦，晚点再喂' // v1 的 feedCooling（喂食不设冷却）
 ]
 
 /** 递归收集文案表里的全部字符串；函数项用中性样例调用一次，扫它的**输出**（模板字面量部分） */
@@ -83,7 +89,7 @@ test('卡15 文案 · D-16 硬规则：/\\d+\\s*(分钟|秒|小时)/ 与 /[+-]\\
   const entries = collect(TEXT, 'TEXT', [])
   // 状态栏常态文本也是用户可见文案（宿主渲染，但字符串由扩展给）⇒ 一并扫
   entries.push(['STATUSBAR_IDLE', STATUSBAR_IDLE])
-  assert.ok(entries.length >= 20, `文案表应被完整遍历，实际收到 ${entries.length} 项`)
+  assert.ok(entries.length >= 18, `文案表应被完整遍历，实际收到 ${entries.length} 项`)
 
   const timeHits = entries.filter(([, text]) => TIME_RE.test(text))
   const deltaHits = entries.filter(([, text]) => DELTA_RE.test(text))
@@ -107,77 +113,90 @@ test('卡15 文案 · 页面侧文案表（app/lib/state.ts）同样满足两条
   const body = src.slice(start, end)
   // 逐行取出所有单引号字符串字面量（页面文案全是中文字符串，没有模板串）
   const literals = [...body.matchAll(/'([^']*)'/g)].map((m) => m[1])
-  assert.ok(literals.length >= 12, `应扫到全部页面文案，实际 ${literals.length} 条`)
+  assert.ok(literals.length >= 10, `应扫到全部页面文案，实际 ${literals.length} 条`)
   assert.deepEqual(literals.filter((s) => TIME_RE.test(s)), [], '页面文案禁数字时间')
   assert.deepEqual(literals.filter((s) => DELTA_RE.test(s)), [], '页面文案禁属性增量数字')
 })
 
-// ————— 五句上游逐字 + D-16 总表其余五条 —————
+// ————— 逐字文案 —————
 
-test('卡15 文案 · 五句与上游 dsh-pet 逐字一致（affinity.ts 四句 + ledger.ts 一句）', () => {
+test('卡15 文案 · 与上游 dsh-pet 逐字一致（affinity.ts 两句 + ledger.ts 一句），码点级核对', () => {
   for (const [key, want] of Object.entries(UPSTREAM_VERBATIM)) {
     assert.equal(TEXT[key], want, `TEXT.${key} 必须与上游逐字一致（R12：漂移不自动跟随）`)
+    assert.deepEqual([...TEXT[key]], [...want], `TEXT.${key} 码点级一致`)
   }
-  // 逐字意味着连标点/波浪号/叹号都不能差：长度与码点一并核对（防"看起来一样"的全半角替换）
-  for (const [key, want] of Object.entries(UPSTREAM_VERBATIM)) {
+  // 逐字意味着连标点/波浪号/叹号都不能差
+  for (const [key, want] of Object.entries(OWN_VERBATIM)) {
+    assert.equal(TEXT[key], want, `TEXT.${key}`)
     assert.deepEqual([...TEXT[key]], [...want], `TEXT.${key} 码点级一致`)
   }
 })
 
-test('卡17 文案 · D-16 总表其余四条逐字（无泡泡/洗澡/玩耍/打盹）；召唤胶囊句已随 Q15=B 删除', () => {
-  for (const [key, want] of Object.entries(OWN_VERBATIM)) {
-    assert.equal(TEXT[key], want, `TEXT.${key}`)
+test('卡15 文案 · v2 已删除的三条旧文案必须从 TEXT 消失（R58），冷却句改由 texts.js 的集合承担', () => {
+  // 这三条各自指向已删除的能力：`play` kind、喂食冷却、打盹机制
+  for (const gone of ['playOk', 'feedCooling', 'sleeping']) {
+    assert.equal(gone in TEXT, false, `TEXT.${gone} 已随对应能力删除（R58），不得复活`)
   }
+  // 点击冷却的第五句不再是 constants 里的单条文案：v2 从 `COOLING_TEXTS`（8 条）取样，
+  // 页面仍保留一份**兜底**同文（回包缺 text 时用），所以这里只断言集合与页面兜底都还在
+  assert.equal(COOLING_TEXTS.length, 8, '冷却文本集合 8 条（specs/pet-favor R3）')
+  const pageSrc = readFileSync(new URL('../app/lib/state.ts', import.meta.url), 'utf8')
+  assert.ok(pageSrc.includes(PET_COOLING_VERBATIM), '页面兜底仍保留摸头冷却同文')
+  // summon/hiddenBlocked 两个 v1 文案键随隐藏功能删除（卡 17 / Q15=B）
   for (const gone of ['summon', 'hiddenBlocked']) {
-    assert.equal(gone in TEXT, false, `TEXT.${gone} 已随隐藏功能移除（卡 17 / Q15=B），不得复活`)
+    assert.equal(gone in TEXT, false, `TEXT.${gone} 已随隐藏功能移除，不得复活`)
   }
 })
 
 test('卡15 文案 · interact() 真的用这些文案（表与逻辑不脱节）', () => {
   const s = (o = {}) => ({ ...initialState(T0), ...o })
-  // 摸头计分 / 摸头冷却
-  assert.equal(interact(s(), 'pet', T0).feedback.text, UPSTREAM_VERBATIM.petOk)
-  assert.equal(interact(s({ lastPetAt: T0 - 60_000 }), 'pet', T0).feedback.text, UPSTREAM_VERBATIM.petCooling)
-  // 喂食成功
-  assert.equal(interact(s({ hunger: 50 }), 'feed', T0).feedback.text, UPSTREAM_VERBATIM.feedOk)
+  // 摸头成功 / 摸头冷却
+  assert.equal(interact(s(), 'pet', T0).text, UPSTREAM_VERBATIM.petOk)
+  const cooling = interact(s({ lastPetAt: T0 - 60_000 }), 'pet', T0)
+  assert.ok(COOLING_TEXTS.includes(cooling.text), '摸头冷却句来自冷却集合')
+  // 喂食 / 洗澡成功
+  assert.equal(interact(s(), 'feed', T0).text, UPSTREAM_VERBATIM.feedOk)
+  assert.equal(interact(s(), 'bathe', T0).text, OWN_VERBATIM.batheOk)
   // 道具不足
-  assert.equal(interact(s({ fish: 0 }), 'feed', T0).error, UPSTREAM_VERBATIM.noFish)
-  assert.equal(interact(s({ bubble: 0 }), 'bathe', T0).error, OWN_VERBATIM.noBubble)
-  // 洗澡 / 玩耍成功
-  assert.equal(interact(s({ clean: 50 }), 'bathe', T0).feedback.text, OWN_VERBATIM.batheOk)
-  assert.equal(interact(s(), 'play', T0).feedback.text, OWN_VERBATIM.playOk)
+  assert.equal(interact(s({ fish: 0 }), 'feed', T0).text, UPSTREAM_VERBATIM.noFish)
+  assert.equal(interact(s({ bubble: 0 }), 'bathe', T0).text, OWN_VERBATIM.noBubble)
   // 冷却内的文案**不随剩余时间变化**（旧实现会把剩余分钟数拼进去，Q12 明令禁止）
-  const cool1 = interact(s({ lastPetAt: T0 - 10_000 }), 'pet', T0).feedback.text
-  const cool2 = interact(s({ lastPetAt: T0 - 290_000 }), 'pet', T0).feedback.text
-  assert.equal(cool1, cool2, '冷却内早晚期同一句（不含数字时间 ⇒ 不需要变量）')
-  assert.equal(typeof TEXT.petCooling, 'string', 'petCooling 已从"模板函数"退化为常量字符串')
-  // 卡 17：summon/hide 两个 kind **已不是互动** ⇒ 既没有 feedback（不是 null，而是压根没有这次互动）
-  assert.equal(interact(s(), 'summon', T0).ok, false, 'summon 不再是被受理的互动')
-  assert.equal(interact(s(), 'hide', T0).ok, false, 'hide 不再是被受理的互动')
-  assert.equal(interact(s(), 'summon', T0).error, TEXT.unknownKind('summon'), '走"未知互动"文案')
+  const cool1 = interact(s({ lastInteractAt: T0 - 10_000 }), 'feed', T0).text
+  const cool2 = interact(s({ lastInteractAt: T0 - 290_000 }), 'feed', T0).text
+  assert.equal(cool1, cool2, '冷却内早晚期同一句（不含数字时间）')
+  // 已知被删的 kind：**没有**文案（未知互动只记诊断，不弹气泡——design D-9）
+  for (const gone of ['summon', 'hide', 'dance']) {
+    const r = interact(s(), gone, T0)
+    assert.equal(r.ok, false, `${gone} 不再是被受理的互动`)
+    assert.equal(r.text, undefined, `${gone} 不产生气泡文案`)
+    assert.equal(r.reason, 'unknown-kind')
+  }
 })
 
-test('卡17 文案 · 页面侧与入口同文（两套构建无法共享模块 ⇒ 源码级对齐）', () => {
+test('卡15 文案 · 页面侧与入口同文（两套构建无法共享模块 ⇒ 源码级对齐）', () => {
   const src = readFileSync(new URL('../app/lib/state.ts', import.meta.url), 'utf8')
-  // 页面必须有：四句反馈兜底 + 摸头冷却兜底 + 两句道具不足兜底 + 打盹提示
+  // 页面必须有：三种成功反馈兜底 + 摸头冷却兜底 + 两句道具不足兜底
   for (const want of [
-    UPSTREAM_VERBATIM.petCooling,
-    UPSTREAM_VERBATIM.feedOk,
     UPSTREAM_VERBATIM.petOk,
+    UPSTREAM_VERBATIM.feedOk,
     OWN_VERBATIM.batheOk,
-    OWN_VERBATIM.playOk,
+    PET_COOLING_VERBATIM,
     UPSTREAM_VERBATIM.noFish,
-    OWN_VERBATIM.noBubble,
-    OWN_VERBATIM.sleeping
+    OWN_VERBATIM.noBubble
   ]) {
     assert.ok(src.includes(want), `app/lib/state.ts 应含逐字文案：${want}`)
   }
-  // 三枚图标按钮的可访问名（design 布局节 + Q15：文字只作为 aria-label/title 存在）
-  for (const label of ['喂食', '洗澡', '玩耍']) {
+  // 两枚图标按钮的可访问名（design 布局节：文字只作为 aria-label 存在）
+  for (const label of ['喂食', '洗澡']) {
     assert.ok(src.includes(label), `页面文案表应含图标可访问名：${label}`)
   }
-  assert.equal(src.includes('隐藏'), false, '页面文案表不再有"隐藏"（Q15=B：面板没有该入口）')
-  assert.equal(src.includes('summon'), false, '页面文案表不再有召唤胶囊文案')
+  // v1 的三枚图标里的「玩耍」与打盹提示必须已从页面**文案表**消失
+  // （只看 TEXT 常量体：文件里解释"为什么删掉 play"的注疏仍允许保留）
+  const tableBody = src.slice(src.indexOf('export const TEXT = {'), src.indexOf('} as const'))
+  assert.equal(tableBody.includes('玩耍'), false, '页面文案表不再有「玩耍」（面板只剩两枚图标）')
+  assert.equal(tableBody.includes('打盹'), false, '页面文案表不再有打盹提示')
+  assert.equal(tableBody.includes('隐藏'), false, '页面文案表不再有"隐藏"（Q15=B：面板没有该入口）')
+  assert.equal(tableBody.includes('summon'), false, '页面文案表不再有召唤胶囊文案')
 })
 
 // ————— 旧文案清场 —————
@@ -185,7 +204,7 @@ test('卡17 文案 · 页面侧与入口同文（两套构建无法共享模块 
 /** 递归列出目录下这些后缀的文件（跳过构建产物与规格/素材目录） */
 function sourceFiles(dir, exts, out = []) {
   for (const name of readdirSync(dir)) {
-    if (['node_modules', 'dist', 'out', '.git'].includes(name)) continue
+    if (['node_modules', 'dist', 'out', '.git', 'assets', 'openspec', 'docs', 'test'].includes(name)) continue
     const path = dir + '/' + name
     if (statSync(path).isDirectory()) sourceFiles(path, exts, out)
     else if (exts.some((e) => name.endsWith(e))) out.push(path)
@@ -208,5 +227,5 @@ test('卡15 文案 · 旧文案清场：lib/**、app/**、index.js、README.md �
       if (text.includes(bad)) offenders.push(`${file.replace(extRoot, '')} ⇒ ${bad}`)
     }
   }
-  assert.deepEqual(offenders, [], '被 Q12/Q13 废止的旧文案必须全部清掉')
+  assert.deepEqual(offenders, [], '被废止的旧文案必须全部清掉')
 })

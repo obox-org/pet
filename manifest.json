@@ -1,9 +1,9 @@
 {
   "name": "pet",
-  "version": "1.0.2",
+  "version": "2.0.0",
   "displayName": "宠物",
   "author": "chenzhi",
-  "description": "桌面宠物：右下角无边框透明窗体，喂食/洗澡/玩耍影响饥饿度、清洁度与心情",
+  "description": "桌面宠物：右下角无边框透明窗体，喂食/洗澡涨成长与好感，点击摸头每小时加好感",
   "apiVersion": 2,
   "main": "./index.js",
   "contributes": {
@@ -15,9 +15,10 @@
       "title": "宠物",
       "fields": [
         { "key": "pet.visible", "label": "显示宠物", "type": "boolean", "default": true },
-        { "key": "pet.hunger", "label": "饥饿度", "type": "progress", "max": 100, "default": 100 },
-        { "key": "pet.clean", "label": "清洁度", "type": "progress", "max": 100, "default": 100 },
-        { "key": "pet.mood", "label": "心情", "type": "progress", "max": 100, "default": 100 },
+        { "key": "pet.growth", "label": "成长值", "type": "status", "default": "0" },
+        { "key": "pet.favor", "label": "好感", "type": "progress", "max": 650, "default": 0 },
+        { "key": "pet.favorExact", "label": "好感（精确值）", "type": "status", "default": "0" },
+        { "key": "pet.level", "label": "等级", "type": "status", "default": "初次见面" },
         { "key": "pet.diagnostic", "label": "诊断", "type": "status", "default": "" }
       ]
     }

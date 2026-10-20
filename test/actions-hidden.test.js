@@ -37,17 +37,12 @@ const STALE_DIAGNOSTIC = '宠物窗体创建失败：overlay id 已存在（重�
 function saveText(overrides = {}) {
   return JSON.stringify({
     schemaVersion: 1,
-    hunger: 42.5,
-    clean: 55.25,
-    mood: 66.75,
     fish: 7,
     bubble: 2,
     growth: 123.4,
-    hungerDropAcc: 0,
-    cleanDropAcc: 0,
-    recoverAcc: 0,
-    afkAcc: 0,
-    lastSettledAt: T0,
+    favor: 0,
+    lastGrowthAt: T0,
+    lastAfkAt: T0,
     lastPetAt: T0 - 1000,
     position: null,
     ...overrides
@@ -93,37 +88,36 @@ function sourceFiles(dir, exts, out = []) {
 
 // ————— 纯函数层：kind 集合与视图/存档形状 —————
 
-test('卡17 移除 · KINDS 只剩四种互动（负向：不含 summon / hide）', () => {
-  assert.deepEqual(
-    [...KINDS].sort(),
-    ['bathe', 'feed', 'pet', 'play'],
-    '合法互动只有 feed/bathe/play/pet（卡 17 / Q15=B）'
-  )
-  for (const gone of ['summon', 'hide']) {
-    assert.equal(KINDS.has(gone), false, `KINDS 不含 ${gone}`)
+test('卡17 移除 · KINDS 只剩三种互动（负向：不含 v1 的 summon / hide / 玩耍 kind）', () => {
+  // v2 的合法互动恰好三种（specs/pet-interaction R1）；v1 的 `summon` / `hide` / 玩耍
+  // 三条 kind 都不在里面。数组而非 Set（可直接 deepEqual 钉住集合内容，不是只断言长度）。
+  assert.deepEqual([...KINDS], ['feed', 'bathe', 'pet'], '合法互动只有 feed/bathe/pet')
+  for (const gone of ['summon', 'hide', 'dance']) {
+    assert.equal(KINDS.includes(gone), false, `KINDS 不含 ${gone}`)
   }
 })
 
-test('卡17 移除 · interact() 对 summon/hide 按"未知互动"拒绝、不携带状态、不改数值', () => {
+test('卡17 移除 · interact() 对 summon/hide 按"未知互动"拒绝、零副作用（不携带 text/anim、不改进度）', () => {
+  const before = initialState(T0)
   for (const kind of ['summon', 'hide']) {
-    const r = interact(initialState(T0), kind, T0)
+    const r = interact(before, kind, T0)
     assert.equal(r.ok, false, `${kind} ⇒ 拒绝`)
-    assert.equal(r.error, TEXT.unknownKind(kind), `${kind} ⇒ 逐字「未知互动: ${kind}」`)
-    assert.equal(r.state, undefined, 'ok:false 不携带状态（调用方无从应用半个状态）')
-    assert.equal(r.feedback, undefined, 'ok:false 也不带 feedback')
+    assert.equal(r.reason, 'unknown-kind', `${kind} ⇒ 未知互动（design D-9 的错误码）`)
+    assert.equal(r.text, undefined, '未知互动不弹气泡（只由入口写一条诊断）')
+    assert.equal(r.anim, undefined, '未知互动不产生动画')
+    assert.deepEqual(r.state, before, '状态一个字节都不动（拒绝分支返回原样快照）')
   }
   // 反向自检：合法 kind 照常工作（拒绝不是因为函数坏了）
   assert.equal(interact(initialState(T0), 'feed', T0).ok, true)
-  assert.equal(interact(initialState(T0), 'play', T0).ok, true)
   // 旧存档字段"hidden"即使被人塞进内存状态，也**不再**拦任何互动（隐藏态拒绝分支已删）
   const legacy = { ...initialState(T0), hidden: true }
   assert.equal(interact(legacy, 'feed', T0).ok, true, 'hidden 不再是能拦住互动的状态')
   assert.equal(interact(legacy, 'pet', T0).ok, true)
 })
 
-test('卡17 移除 · buildView 返回不含 hidden 键（PetStateView 回到五键契约）', () => {
+test('卡17 移除 · buildView 返回不含 hidden 键（PetStateView 是 v2 四键契约）', () => {
   const view = buildView(initialState(T0), T0)
-  assert.deepEqual(Object.keys(view).sort(), ['anim', 'bubble', 'growth', 'items', 'vitals'])
+  assert.deepEqual(Object.keys(view).sort(), ['anim', 'bubble', 'items', 'values'])
   assert.equal('hidden' in view, false, '视图里没有 hidden 这个键（不是 undefined，是压根不存在）')
 })
 
@@ -157,9 +151,8 @@ test('卡17 移除 · 入口 pet.interact{summon|hide} ⇒ 未知互动拒绝，
     assert.equal(r.state, undefined)
   }
   const after = await rec.send('pet.ready')
-  assert.deepEqual(after.state.vitals, before.state.vitals, '三属性一个字节都没动')
+  assert.deepEqual(after.state.values, before.state.values, '成长值/好感/等级一个字节都没动')
   assert.deepEqual(after.state.items, before.state.items, '库存没动')
-  assert.deepEqual(after.state.growth, before.state.growth, '成长值没动')
   assert.equal(mainWrites(), 0, '被拒的请求不触发任何写盘')
 
   // 合法互动照常可用（对照组）
@@ -187,7 +180,7 @@ test('卡17 移除 · 旧存档带 hidden:true + position ⇒ 正常读入：不
   const r = await rec.send('pet.ready')
   assert.equal(r.ok, true)
   assert.equal('hidden' in r.state, false, '读进来的状态里没有 hidden')
-  assert.deepEqual(r.state.vitals, { hunger: 42.5, clean: 55.25, mood: 66.75 }, '其余字段照常读入')
+  assert.deepEqual(r.state.values, { growth: 123, favor: 0, level: 1, levelName: '初次见面' }, '其余字段照常读入')
   assert.equal(r.state.items.fish, 7)
   assert.deepEqual(setPositions(), [{ x: 1, y: 2 }], '存档 position 照常应用到窗体')
   cleanup()
@@ -243,8 +236,10 @@ test('卡17 移除 · 入口源码清场：lib/** 与 index.js 里没有 hidden/
 test('卡17 移除 · app/** 源码清场：不出现 summon / 召唤 / 隐藏 / isHidden（产物 grep 的源码级保证）', () => {
   const files = sourceFiles(`${extRoot}app`, ['.ts', '.vue', '.css', '.html'], [])
   assert.ok(files.length >= 12, `应扫到全部页面源码，实际 ${files.length} 个`)
-  // 注意：`overflow: hidden` / `visibilityState === 'hidden'` 是合法用法，所以这里只禁这些词形
-  const banned = ['summon', '召唤', '隐藏', 'isHidden', 'TEXT.hide', "emit('hide')", '.summon']
+  // 注意：`overflow: hidden` / `visibilityState === 'hidden'` 是合法用法，所以这里只禁这些词形；
+  // `'summon'` / `"summon"` 只禁**代码形态**——解释"旧载荷为什么被拒绝"的中文注疏允许保留
+  // （`lib/interact.js` 的 KINDS 注释同理，见下一条）。
+  const banned = ["'summon'", '"summon"', '召唤', '隐藏', 'isHidden', 'TEXT.hide', "emit('hide')", '.summon', 'summonEl']
   const offenders = []
   for (const file of files) {
     const text = readFileSync(file, 'utf8')

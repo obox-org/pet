@@ -1,144 +1,184 @@
 /**
- * pet-vitals · 惰性结算纯函数测试（specs/pet-vitals 的衰减/钳制/联动/补算/回拨 scenario）。
+ * settle · **v2** 结算语义（specs/pet-values R1「成长值」、specs/pet-economy「挂机奖励」；
+ * design D-1 字段表 / D-3 定时器表 / D-4 回拨条）。
  *
- * 对应任务卡验收清单：运行满一分钟饥饿 -1；下限钳 0；饥饿自 80→70 心情 -1 且不重复计分；
- * 心情已 95 时恢复途径不再加；休眠 10 分钟恢复后只补算一次；关闭 3 天重启不追算；时间回拨钳 0。
- * （存档 schemaVersion / 备份重建的 scenario 在 persist.test.js；"正常恢复且不追算离线"两档都有。）
+ * ⚠️ 本文件是 v1 `pet-vitals` 用例（三属性速率/下限钳制/联动记账/`ledgerRecover`/
+ * `lastSettledAt` 启动重置）的**改写**，不是简单删断言：那些断言所指向的能力已随
+ * `specs/pet-vitals` 的 4 条 REMOVED 整体删除（衰减、联动、属性上限），而 v2 的 `settle()`
+ * 仍有它自己的语义需要钉住——用**时间戳差**结算的成长值与挂机奖励。
+ *
+ * 覆盖（逐条对应 v2 的 spec 与 design）：
+ * - 成长值：不足一小时不动、满一小时 +1、基准推进整小时（零头不丢）、单次补算上限 24 小时；
+ * - 挂机奖励：每满 1200 秒鱼干/泡泡各 +1、各自独立钳 20、跨结算周期连续；
+ * - 窗体门控：`overlayExists !== true` ⇒ 不涨且基准跟走到 now（关窗不计成长、不发挂机）；
+ * - `changed` 只反映用户可见数值（时间戳推进不算"变了"，否则每个 tick 都会 rev++ 并写盘）；
+ * - 时间回拨：任一累积基准落在未来 ⇒ 本次不结算、发一条 `WARN.clockRewind`、基准重置为 now；
+ * - 幂等（同一 now 重复结算不多发）与脏输入（非对象状态/NaN now/畸形基准不抛错、无 NaN）。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { initialState, settle, startupReset } from '../lib/settle.js'
-import { ledgerRecover } from '../lib/vitals.js'
+import {
+  AFK_PERIOD_SEC,
+  GROWTH_BACKFILL_CAP_HOURS,
+  GROWTH_PER_HOUR,
+  INITIAL_BUBBLE,
+  INITIAL_FISH,
+  ITEM_CAP,
+  WARN
+} from '../lib/constants.js'
+import { initialState, onWindowDestroyed, settle, startupReset } from '../lib/settle.js'
 
 /** 固定基准时刻：纯函数不读时钟，全部用可控的绝对毫秒 */
 const T0 = 1_700_000_000_000
+const HOUR = 3_600_000
+/** 一个挂机周期的毫秒数 */
+const AFK = AFK_PERIOD_SEC * 1000
 
 function st(overrides = {}) {
   return { ...initialState(T0), ...overrides }
 }
 
-/** 浮点断言：衰减速率是 1/60、10/3600 这类二进制不精确值，比较用容差而不是全等 */
-function close(actual, expected, what = '') {
-  assert.ok(Math.abs(actual - expected) < 1e-9, `${what} 期望 ≈${expected}，实际 ${actual}`)
-}
+// ————— 成长值：整小时发放 —————
 
-test('pet-vitals · 运行满一分钟：饥饿 -1，清洁/心情按各自速率同比变化（清洁 ≈ -0.1667/分钟）', () => {
-  const r = settle(st(), T0 + 60_000, { overlayExists: true })
-  close(r.state.hunger, 99, 'hunger') // -1/分钟 × 1 分钟
-  close(r.state.clean, 100 - 10 / 60, 'clean') // -10/小时 ≈ -0.1667/分钟
-  close(r.state.mood, 100 - (5 / 3600) * 60, 'mood') // -5/小时 ≈ -0.0833/分钟
-  assert.equal(r.changed, true)
+test('settle · 成长值：不足一小时不动，满一小时 +1，且基准只推进已发放的整小时', () => {
+  // 取 10 分钟（< 1 小时，也 < 挂机周期 1200s）⇒ 两个来源都不发放，changed 为 false
+  const half = settle(st(), T0 + 600_000, { overlayExists: true })
+  assert.equal(half.state.growth, 0, '未满一小时不涨')
+  assert.equal(half.state.lastGrowthAt, T0, '基准不动（零头跨 tick 继续攒）')
+  assert.equal(half.changed, false, '没有可见变化 ⇒ changed=false（不触发 rev++/写盘）')
+
+  const one = settle(st(), T0 + HOUR, { overlayExists: true })
+  assert.equal(one.state.growth, GROWTH_PER_HOUR, '满一小时恰好 +1')
+  assert.equal(one.state.lastGrowthAt, T0 + HOUR, '基准推进到整小时')
+  assert.equal(one.changed, true, '成长值变了 ⇒ changed=true')
+
+  // 1.9 小时：只发 1 点，基准停在 T0+1h（剩余 0.9 小时留给下一次结算）
+  const late = settle(st(), T0 + HOUR * 1.9, { overlayExists: true })
+  assert.equal(late.state.growth, 1, '只发已满的整小时')
+  assert.equal(late.state.lastGrowthAt, T0 + HOUR, '零头不丢')
+  assert.equal(settle(late.state, T0 + HOUR * 2, { overlayExists: true }).state.growth, 2)
 })
 
-test('pet-vitals · 下限钳制：属性已为 0 继续结算保持 0，不出现负数', () => {
-  const r = settle(st({ hunger: 0, clean: 0, mood: 0 }), T0 + 3600_000, { overlayExists: false })
-  assert.equal(r.state.hunger, 0)
-  assert.equal(r.state.clean, 0)
-  assert.equal(r.state.mood, 0)
-  // 全饱和且无产出 ⇒ 无可见变化（入口据此跳过唤醒/写盘）
+test('settle · 成长值：连续运行三小时 +3（每小时一个来源，不叠加互动点）', () => {
+  const r = settle(st(), T0 + HOUR * 3, { overlayExists: true })
+  assert.equal(r.state.growth, 3 * GROWTH_PER_HOUR)
+  assert.equal(r.state.favor, 0, '时间流逝不涨好感（好感只来自互动）')
+})
+
+test('settle · 成长值：单次补算上限 24 小时，且基准直接推到当前时刻（防改时钟刷值）', () => {
+  const r = settle(st({ lastGrowthAt: T0 - HOUR * 48 }), T0, { overlayExists: true })
+  assert.equal(r.state.growth, GROWTH_BACKFILL_CAP_HOURS, `补算上限 ${GROWTH_BACKFILL_CAP_HOURS} 小时`)
+  assert.equal(r.state.lastGrowthAt, T0, '被上限截断 ⇒ 基准推到 now（丢掉零头）')
+})
+
+// ————— 窗体门控：关窗不计成长、不发挂机 —————
+
+test('settle · 窗体不在：成长与挂机都不发放，基准跟走到 now（关窗三小时再开不补算）', () => {
+  const off = settle(st(), T0 + HOUR * 3, { overlayExists: false })
+  assert.equal(off.state.growth, 0, '关窗期间 MUST NOT 计入成长')
+  assert.equal(off.state.fish, INITIAL_FISH, '关窗期间不挂机')
+  assert.equal(off.state.bubble, INITIAL_BUBBLE)
+  assert.equal(off.state.lastGrowthAt, T0 + HOUR * 3, '基准跟走到 now')
+  assert.equal(off.state.lastAfkAt, T0 + HOUR * 3, '挂机基准同样跟走')
+
+  // 默认值（不显式声明 overlayExists）语义 = 窗体不在：宁可今天不涨，也不误发
+  const dflt = settle(st(), T0 + HOUR)
+  assert.equal(dflt.state.growth, 0)
+  assert.equal(dflt.state.fish, INITIAL_FISH)
+
+  // 重新开窗后从那一刻重新计时：再满一小时才 +1
+  const reopened = settle(off.state, T0 + HOUR * 4, { overlayExists: true })
+  assert.equal(reopened.state.growth, 1, '重开后满一小时 +1（不是 +4）')
+})
+
+test('settle · 销毁窗体时把两个累积基准推到当时（onWindowDestroyed 的唯一职责）', () => {
+  const closed = onWindowDestroyed(st({ growth: 5 }), T0 + 12_345)
+  assert.equal(closed.lastGrowthAt, T0 + 12_345)
+  assert.equal(closed.lastAfkAt, T0 + 12_345)
+  assert.equal(closed.growth, 5, '数值本身不动（只是宣布"关窗期间不计时"）')
+  // startupReset **不**重置累积基准（v2 要求重开按存档补算，与 v1 相反）
+  assert.equal(startupReset({ ...closed, lastGrowthAt: T0 }, T0 + 999).lastGrowthAt, T0)
+})
+
+// ————— 挂机奖励：1200 秒周期 —————
+
+test('settle · 挂机奖励：满一个周期各 +1；未满周期不发；跨结算周期连续累计', () => {
+  const first = settle(st(), T0 + AFK - 1, { overlayExists: true })
+  assert.equal(first.state.fish, INITIAL_FISH, '差 1ms 不发')
+  assert.equal(first.state.lastAfkAt, T0, '基准不动（零头保留）')
+
+  const second = settle(first.state, T0 + AFK, { overlayExists: true })
+  assert.equal(second.state.fish, INITIAL_FISH + 1)
+  assert.equal(second.state.bubble, INITIAL_BUBBLE + 1)
+  assert.equal(second.state.lastAfkAt, T0 + AFK, '只推进已发放的整周期')
+
+  const twoPeriods = settle(st(), T0 + AFK * 2, { overlayExists: true })
+  assert.equal(twoPeriods.state.fish, INITIAL_FISH + 2, '两个整周期发两次')
+})
+
+test('settle · 挂机奖励：各自独立钳 20（鱼干到顶泡泡照常），周期照常被消耗不囤积', () => {
+  const r = settle(st({ fish: ITEM_CAP, bubble: 19 }), T0 + AFK, { overlayExists: true })
+  assert.equal(r.state.fish, ITEM_CAP, '到顶不再加')
+  assert.equal(r.state.bubble, 20, '未满的照常 +1')
+
+  // 两个整周期（2400s < 3600s，避开成长值的那一小时）⇒ 双满后没有可见变化
+  const both = settle(st({ fish: ITEM_CAP, bubble: ITEM_CAP }), T0 + AFK * 2, { overlayExists: true })
+  assert.equal(both.state.fish, ITEM_CAP)
+  assert.equal(both.state.bubble, ITEM_CAP)
+  assert.equal(both.state.lastAfkAt, T0 + AFK * 2, '双满后周期照常被消耗（不囤积）')
+  assert.equal(both.changed, false, '双满后没有可见变化')
+})
+
+// ————— changed 口径 / 幂等 / 回拨 / 脏输入 —————
+
+test('settle · changed 只反映可见数值：只有时间戳推进时为 false（否则每个 tick 都会写盘）', () => {
+  const s = st({ lastAfkAt: T0 + 1 }) // 基准已推进，但没有任何发放
+  const r = settle(s, T0 + AFK / 2, { overlayExists: true })
+  assert.equal(r.state.lastAfkAt, s.lastAfkAt, '未满周期 ⇒ 基准不动')
   assert.equal(r.changed, false)
+  assert.equal(r.warnings.length, 0)
 })
 
-test('pet-vitals · 饥饿联动扣分：饥饿自 80 累计降到 70 ⇒ 心情 -1，且该 10 点不重复计分', () => {
-  // 第一段：601s ⇒ 饥饿净降 10.0167 ⇒ 触发一次 -1，零头 0.0167 留账
-  const r1 = settle(st({ hunger: 80, mood: 100, clean: 100 }), T0 + 601_000, { overlayExists: false })
-  close(r1.state.hunger, 80 - 601 / 60, 'hunger')
-  close(r1.state.mood, 100 - (5 / 3600) * 601 - 1, 'mood（自然衰减 -5/h 再联动 -1）')
-  assert.ok(r1.state.hungerDropAcc > 0 && r1.state.hungerDropAcc < 10, '零头保留在账上')
-
-  // 第二段：再 590s（累计净降 19.85 < 20）⇒ 不再触发第二次扣分（"不重复计分"）
-  const r2 = settle(r1.state, T0 + 601_000 + 590_000, { overlayExists: false })
-  const natural = (5 / 3600) * 590 // 这一段只应扣自然衰减
-  close(r2.state.mood, r1.state.mood - natural, 'mood（第二段无联动扣分）')
-  close(r2.state.hungerDropAcc, r1.state.hungerDropAcc + 590 / 60, '账本零头跨周期连续')
+test('settle · 幂等：同一个 now 重复结算不多发（用时间戳差而不是累加，天然幂等）', () => {
+  const at = T0 + HOUR * 2 + AFK
+  const once = settle(st(), at, { overlayExists: true })
+  const twice = settle(once.state, at, { overlayExists: true })
+  assert.equal(twice.state.growth, once.state.growth)
+  assert.equal(twice.state.fish, once.state.fish)
+  assert.equal(twice.state.bubble, once.state.bubble)
+  assert.equal(twice.changed, false, '第二次无可见变化')
 })
 
-test('pet-vitals · 联动零头跨结算周期连续：5 点 + 5 点 = 满 10 才触发一次心情 -1', () => {
-  const r1 = settle(st({ hunger: 100 }), T0 + 300_000, { overlayExists: false }) // 降 5 点
-  close(r1.state.hungerDropAcc, 5, '第一段账本')
-  close(r1.state.mood, 100 - (5 / 3600) * 300, '第一段心情（只有自然衰减）')
-
-  const r2 = settle(r1.state, T0 + 600_000, { overlayExists: false }) // 再降 5 点 ⇒ 满 10
-  close(r2.state.hungerDropAcc, 0, '触发后扣掉 10')
-  close(r2.state.mood, r1.state.mood - (5 / 3600) * 300 - 1, '第二段心情（自然衰减 + 联动 -1）')
-})
-
-test('pet-vitals · 清洁联动同样记账：清洁每累计下降 10 点 ⇒ 心情 -1', () => {
-  // 预置账上 9 点，再让清洁净降 1 点（360s × 10/小时）⇒ 恰好满 10 触发一次；
-  // 时长选 360s 是为了把饥饿的净降压在 10 点以下（6 点），隔离出清洁联动这一条路径
-  const r = settle(st({ clean: 50, cleanDropAcc: 9 }), T0 + 360_000, { overlayExists: false })
-  close(r.state.clean, 50 - 1, 'clean 净降 1')
-  close(r.state.cleanDropAcc, 0, '触发后扣掉 10')
-  close(r.state.mood, 100 - (5 / 3600) * 360 - 1, 'mood（自然衰减 -0.5 再联动 -1）')
-  close(r.state.hungerDropAcc, 6, '饥饿账本只有 6 点，未触发（联动互不串账）')
-})
-
-test('pet-vitals · 恢复联动不超 95：心情已 95 且恢复满 10 点 ⇒ 保持 95（不推到 96 及以上）', () => {
-  const r = ledgerRecover(0, 10, 95)
-  assert.equal(r.mood, 95)
-  assert.equal(r.acc, 0, '点数照常消耗（触发过就不留账）')
-
-  // 心情高于 95（玩耍途径可达 100）：恢复联动**不加也不倒扣**（口径见 lib/vitals.js 注释）
-  const r2 = ledgerRecover(0, 10, 98)
-  assert.equal(r2.mood, 98)
-
-  // 95 以下正常 +1，且被 95 封顶：94.5 → min(95.5, 95) = 95
-  const r3 = ledgerRecover(0, 10, 94.5)
-  assert.equal(r3.mood, 95)
-})
-
-test('pet-vitals · 休眠后补算一次：10 分钟（含挂机收益）恰好补算一次，重复结算幂等', () => {
-  // spec 场景是"休眠 10 分钟"；为同时覆盖"挂机收益只发一次"，用 20 分钟（1200s）档：
-  const r1 = settle(st(), T0 + 1200_000, { overlayExists: true })
-  close(r1.state.hunger, 100 - 20, 'hunger -20（-1/分钟 × 20 分钟）')
-  assert.equal(r1.state.fish, 4, '挂机 20 分钟恰好发 1 条鱼干')
-  assert.equal(r1.state.bubble, 4, '挂机 20 分钟恰好发 1 个泡泡')
-  close(r1.state.afkAcc, 0, '挂机账扣掉一个周期')
-
-  // 对同一 now 再结算 ⇒ 补算不重复（幂等：lastSettledAt 已推进）
-  const r2 = settle(r1.state, T0 + 1200_000, { overlayExists: true })
-  assert.equal(r2.changed, false)
-  assert.equal(r2.state.fish, 4)
-  assert.equal(r2.state.hunger, r1.state.hunger)
-  assert.equal(r2.state.mood, r1.state.mood)
-})
-
-test('pet-vitals · 关闭三天不追算：startupReset 把 lastSettledAt 重置为当前时刻', () => {
-  const threeDays = 3 * 86_400_000
-  const saved = st({ hunger: 42, clean: 55, mood: 66, lastSettledAt: T0 - threeDays })
-  const restarted = startupReset(saved, T0) // 启动：读档 ⇒ 重置（不追算离线，grill Q4）
-  assert.equal(restarted.lastSettledAt, T0)
-
-  const r = settle(restarted, T0 + 15_000, { overlayExists: true }) // 第一个 tick（15s）
-  close(r.state.hunger, 42 - 0.25, 'hunger 只扣 15 秒，而不是 3 天')
-  assert.ok(r.state.hunger > 40, '若追算离线 3 天，hunger 早就钳到 0 了')
-  close(r.state.afkAcc, 15, '挂机也只从启动时刻累计')
-})
-
-test('pet-vitals · 时间回拨：settle(now=-1000) ⇒ dt 钳 0、无负衰减、warn 并重置基准', () => {
-  const s = st({ hunger: 80, lastSettledAt: 5000 })
-  const r = settle(s, -1000, { overlayExists: true }) // 任务卡负向自检的逐字输入
-  assert.equal(r.state.hunger, 80, '无负衰减（属性不会因回拨反向增长）')
-  assert.equal(r.state.mood, s.mood)
-  assert.equal(r.state.fish, 3, '无负产出')
-  assert.equal(r.state.afkAcc, 0, 'dt 钳 0 ⇒ 挂机不累计')
-  assert.equal(r.state.lastSettledAt, -1000, '基准重置为 now')
-  assert.equal(r.warnings.length, 1, '产生一条回拨告警（入口打 [pet] warn）')
+test('settle · 时间回拨：累积基准落在未来 ⇒ 本次不结算、发一条告警、基准重置为 now', () => {
+  // 两个基准都被人为放到"未来"（改系统时钟 / 夏令时回拨的等价输入）
+  const s = st({ lastGrowthAt: T0 + HOUR, lastAfkAt: T0 + HOUR, growth: 7, fish: 5 })
+  const r = settle(s, T0, { overlayExists: true })
+  assert.deepEqual(r.warnings, [WARN.clockRewind], '恰好一条回拨告警（入口打 [pet] warn）')
   assert.match(r.warnings[0], /时间回拨/)
-  assert.equal(r.changed, false)
+  assert.equal(r.state.growth, 7, '回拨不发放、也不产生负成长')
+  assert.equal(r.state.fish, 5, '不发放挂机奖励')
+  assert.equal(r.state.lastGrowthAt, T0, '基准重置为 now')
+  assert.equal(r.state.lastAfkAt, T0)
+  assert.equal(r.changed, false, '没有任何可见数值被改动')
+
+  // 反向自检：回拨修复后，下一次正常结算照常发放（不是"永久停摆"）
+  const next = settle(r.state, T0 + HOUR, { overlayExists: true })
+  assert.equal(next.state.growth, 8)
 })
 
-test('pet-vitals · 脏输入不污染：mood 为 NaN/字符串/负数/超 100 ⇒ 钳制或回退，结果无 NaN', () => {
-  const nan = settle(st({ mood: NaN }), T0 + 60_000, { overlayExists: false })
-  assert.ok(Number.isFinite(nan.state.mood), 'NaN 回退初值后正常衰减')
-  close(nan.state.mood, 100 - 5 / 60, 'NaN ⇒ 回退 100')
+test('settle · 脏输入：非对象状态 / NaN now / 畸形基准都不抛错，且结果里没有 NaN', () => {
+  for (const bad of [null, undefined, 42, 'state', []]) {
+    const r = settle(bad, T0, { overlayExists: true })
+    assert.equal(typeof r.state, 'object')
+    assert.ok(Number.isFinite(r.state.growth), `state=${String(bad)} ⇒ growth 有限`)
+    assert.ok(Number.isFinite(r.state.lastGrowthAt), `state=${String(bad)} ⇒ 基准有限（不产生 NaN）`)
+  }
+  const nanNow = settle(st(), Number.NaN, { overlayExists: true })
+  assert.ok(Number.isFinite(nanNow.state.lastGrowthAt), 'now 非法 ⇒ 基准归一为 0，不出 NaN')
+  assert.ok(Number.isFinite(nanNow.state.growth))
 
-  const str = settle(st({ mood: '50' }), T0 + 60_000, { overlayExists: false })
-  close(str.state.mood, 100 - 5 / 60, '数字字符串按拒绝处理 ⇒ 回退初值（口径见 lib/persist.js 头注释）')
-
-  const neg = settle(st({ mood: -50 }), T0 + 60_000, { overlayExists: false })
-  assert.equal(neg.state.mood, 0, '负数钳到 0')
-
-  const over = settle(st({ mood: 150 }), T0 + 60_000, { overlayExists: false })
-  close(over.state.mood, 100 - 5 / 60, '超 100 钳到 100')
+  // 畸形基准：负数的 lastGrowthAt 视为"很久以前" ⇒ 最多补到上限（与 lib/growth.js 注释同口径）
+  const dirty = settle(st({ lastGrowthAt: 'x' }), T0, { overlayExists: true })
+  assert.equal(dirty.state.growth, GROWTH_BACKFILL_CAP_HOURS, "lastGrowthAt:'x' ⇒ 归一 0 ⇒ 视为已到期")
+  assert.ok(Number.isFinite(dirty.state.lastGrowthAt))
 })

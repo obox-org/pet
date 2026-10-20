@@ -80,7 +80,6 @@ test('卡19 · 真实互动一律不被折掉：self=false 时**即便锁存位�
   for (const [kind, status] of [
     ['feed', 'eating'],
     ['bathe', 'bathing'],
-    ['play', 'playing'],
     ['pet', 'petted']
   ]) {
     const anim = { row: STATUS_TRACK[status].row, status, self: false }
@@ -91,8 +90,10 @@ test('卡19 · 真实互动一律不被折掉：self=false 时**即便锁存位�
       `${kind}：锁存位脏了也不折（用户刚点的动作必须播满一轮）`
     )
   }
-  // 普通状态（无 transient）同样不受锁存影响：self=false ⇒ 原样交给 decideAnimation
-  for (const status of ['idle', 'hungry', 'dirty', 'sad', 'sleep']) {
+  // 非互动状态（无 transient 的 idle 与三条入口自发的表演轨已由上一组覆盖）：
+  // self=false ⇒ 原样交给 decideAnimation。v1 的四条状态指示轨已随三属性与打盹删除，
+  // 所以这里只剩 idle 一个"非瞬时"的真实状态。
+  for (const status of ['idle']) {
     const anim = { row: STATUS_TRACK[status].row, status, self: false }
     assert.deepEqual(entryTrackOf(anim, true), { status, row: anim.row }, `${status}：非自发表演不折`)
   }
@@ -169,7 +170,11 @@ test('卡19 · App.vue 接线：入口轨按 anim.self 判定、兜底定时器�
 })
 
 test('卡19 · 契约与归一化：state.ts 的 anim.self 只认真布尔 true，DEFAULT_STATE 也有它', () => {
-  assert.match(stateTs, /anim: \{ row: number; label: string; status: string; self: boolean \}/, 'PetStateView 声明 self')
+  // v2 的页面契约把 anim 抽成了具名接口（v1 是内联对象字面量），所以这里按接口体断言四个字段
+  const animView = stateTs.slice(stateTs.indexOf('export interface AnimView'), stateTs.indexOf('export interface PetStateView'))
+  for (const field of ['row: number', 'label: string', 'status: string', 'self: boolean']) {
+    assert.ok(animView.includes(field), `AnimView 声明 ${field}`)
+  }
   assert.match(stateTs, /self: animRaw\.self === true/, '畸形 self（字符串/数字/null/对象）一律归一 false')
   assert.match(stateTs, /anim: \{ row: -1, label: '', status: '', self: false \}/, '首帧占位态也有 self:false')
 })
@@ -191,7 +196,7 @@ test('卡19 · 删除项防回归：入口与页面都不再有任何"按状态�
 
 // ————— 顺带：✕ 关闭按钮焦点环改白色（父代理裁定 R53 / 复验报告 O-2） —————
 
-test('卡19 · R53：✕ 关闭按钮的 :focus-visible 环为白色 2px（与三枚图标按钮统一），可访问属性不动', () => {
+test('卡19 · R53：✕ 关闭按钮的 :focus-visible 环为白色 2px（与两枚图标按钮统一），可访问属性不动', () => {
   const style = panel.slice(panel.indexOf('<style scoped>'))
   const close = style.slice(style.indexOf('.close:focus-visible'), style.indexOf('.sync-hint'))
   assert.ok(close.length > 0, '定位到关闭按钮的焦点环规则')
@@ -200,7 +205,7 @@ test('卡19 · R53：✕ 关闭按钮的 :focus-visible 环为白色 2px（与�
   assert.equal(/rgba\(/.test(close.slice(0, close.indexOf('}'))), false, '焦点环规则内不再有任何半透明色（旧青色是 rgba 形式）')
   assert.equal(/rgba\(56, 189, 248/.test(panel), false, '旧的青色焦点环色值已整条消失')
   assert.equal(/#38bdf8/.test(panel), false, '短写形式同样不再出现')
-  // 与三枚图标按钮的焦点环逐字一致（"统一"是可断言的，不是观感描述）
+  // 与两枚图标按钮的焦点环逐字一致（"统一"是可断言的，不是观感描述）
   const act = style.slice(style.indexOf('.act:focus-visible'), style.indexOf('.tip {'))
   assert.match(act, /box-shadow: 0 0 0 2px #ffffff/, '图标按钮是白色 2px')
   assert.equal(
@@ -208,8 +213,9 @@ test('卡19 · R53：✕ 关闭按钮的 :focus-visible 环为白色 2px（与�
     act.slice(act.indexOf('box-shadow'), act.indexOf('}', act.indexOf('box-shadow'))),
     '两处焦点环属性逐字相同'
   )
-  // 只改颜色环：aria-label / 关闭行为 / 三枚图标不受影响
+  // 只改颜色环：aria-label / 关闭行为 / 两枚图标不受影响
   assert.match(panel, /:aria-label="TEXT\.closePanel"/, '关闭按钮的 aria-label 未动')
   assert.match(panel, /@click="emit\('close'\)"/, '关闭行为未动')
-  assert.equal((panel.slice(panel.indexOf('<template>'), panel.indexOf('</template>')).match(/<svg/g) ?? []).length, 3, '三枚图标仍在')
+  // v2 的面板只剩两枚互动图标（v1 的第三枚已随 play kind 删除）
+  assert.equal((panel.slice(panel.indexOf('<template>'), panel.indexOf('</template>')).match(/<svg/g) ?? []).length, 2, '两枚图标仍在')
 })

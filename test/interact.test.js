@@ -1,18 +1,30 @@
 /**
- * pet-interaction · 点击冷却与三互动（specs/pet-interaction 全部入口侧 scenario）。
+ * pet-interaction · 互动结果 → 视图动画的**整链路**（specs/pet-interaction R1/R3/R5/R6；
+ * design D-2 状态表 / D-4 判定顺序）。
  *
- * 对应任务卡验收清单：冷却内点击 ⇒ 心情不变但有反馈；冷却到期点击 ⇒ 心情 +1；
- * 喂食 ⇒ 鱼干 -1、饥饿 +5、anim 切 eating；玩耍 ⇒ 心情 +5、道具不变。
- * （"悬停面板出现/消失"的页面呈现归卡 08；入口侧的对应契约 = pet.hit ⇒ setMouseThrough + 唤醒，
- *  在 window.test.js / extension.test.js 覆盖。）
+ * ⚠️ 本文件是 v1 用例的改写：v1 里的"玩耍（`play`）不耗道具""心情 +1 / 上限钳 100"
+ * "气泡 2600ms""任何成功互动刷新最近交互时刻（打盹退出条件）"分别指向
+ * **已删除的能力**（`play` kind、三属性数值与上限、2600ms 气泡、打盹机制），
+ * 因此按 v2 重写为下面四条——它们钉的是**仍然存在**的契约：
+ *
+ * - 三种合法互动（喂食/洗澡/点击）→ `interact()` 的 `anim` → `buildView().anim`
+ *   = `{ row, label, status, self:false }`，且一轮播完回落 `idle`；
+ * - 成功互动推进对应的冷却基准与挂机基准（v2 的 `lastInteractAt` **只**表示共享冷却，
+ *   不再兼职"最近交互时刻"）；
+ * - 点击冷却期仍给 `anim:'petted'` 与一条**冷却文本**（数值不变、动画照播）；
+ * - 未知 kind（含已删除的 `play`）不再产生任何动画或文本。
+ *
+ * 纯函数层的判定顺序、零副作用与文案来自 `lib/texts.js` 的取样细节由
+ * `test/interaction-v2.test.js` 覆盖；本文件只补"接到视图上"的那一段。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { buildView } from '../lib/bridge.js'
+import { INTERACT_COOLDOWN_MS, PET_COOLDOWN_MS, TRANSIENT_MS } from '../lib/constants.js'
 import { interact } from '../lib/interact.js'
 import { resolveStatus } from '../lib/mapping.js'
-import { buildView } from '../lib/bridge.js'
 import { initialState } from '../lib/settle.js'
-import { PET_COOLDOWN_MS, TEXT, TRANSIENT_MS } from '../lib/constants.js'
+import { COOLING_TEXTS } from '../lib/texts.js'
 
 const T0 = 1_700_000_000_000
 
@@ -20,107 +32,92 @@ function st(overrides = {}) {
   return { ...initialState(T0), ...overrides }
 }
 
-test('pet-interaction · 冷却内重复点击：心情不变、不推进冷却基准，但仍有 petted 反馈', () => {
-  const s = st({ mood: 80, lastPetAt: T0 - 60_000 }) // 1 分钟前刚计过分
-  const r = interact(s, 'pet', T0)
-  assert.equal(r.ok, true, '冷却内点击仍成功返回（有反馈）')
-  assert.equal(r.state.mood, 80, '心情不变（不加分）')
-  assert.equal(r.state.lastPetAt, T0 - 60_000, '冷却以"上次计分点击"为基准，未被刷新')
-  assert.equal(r.feedback.kind, 'pet')
-  assert.equal(r.feedback.tone, 'bad', '未计分 ⇒ 坏语气（页面渲染深色气泡）')
-  // 卡 15 换文案（D-16 / 增补 Q12）：原「再摸也不会更开心啦（还需 4 分钟）」含"数字 + 时间单位"⇒ 废止；
-  // 新句与上游 dsh-pet 逐字一致，且**不再依赖剩余时间**（冷却 1 分钟前与 4 分 59 秒前同一句）
-  assert.equal(r.feedback.text, '摸过头啦，让鲸鱼娘歇口气～')
-  assert.equal(r.feedback.text, TEXT.petCooling)
-  assert.equal(interact(st({ mood: 80, lastPetAt: T0 - 299_000 }), 'pet', T0).feedback.text, TEXT.petCooling)
-  assert.equal(r.state.transient.status, 'petted', '仍播放 petted 反馈动画')
-})
+/** 把 `interact()` 返回的状态写进 transient（入口 index.js 的那一步），再出权威视图 */
+function viewOf(result, now) {
+  const state = { ...result.state, transient: { status: result.anim, until: now + TRANSIENT_MS[result.anim] } }
+  return { state, view: buildView(state, now) }
+}
 
-test('pet-interaction · 冷却到期后点击：心情 +1 并刷新计分时刻', () => {
-  const s = st({ mood: 80, lastPetAt: T0 - PET_COOLDOWN_MS }) // 恰好满 5 分钟
-  const r = interact(s, 'pet', T0)
-  assert.equal(r.ok, true)
-  assert.equal(r.state.mood, 81, '心情 +1')
-  assert.equal(r.state.lastPetAt, T0)
-  assert.equal(r.feedback.text, TEXT.petOk) // 卡 15：'咕噜咕噜～被摸摸好舒服！'（上游 affinity.ts 逐字，原为'心情 +1'）
-  assert.equal(r.feedback.tone, 'good')
-  // 首次点击（无计分历史 lastPetAt=0）同样计分
-  const first = interact(st({ mood: 50 }), 'pet', T0)
-  assert.equal(first.state.mood, 51)
-})
-
-test('pet-interaction · 点击心情受上限约束：99.5 + 1 钳到 100（互动途径可超 95）', () => {
-  const r = interact(st({ mood: 99.5 }), 'pet', T0)
-  assert.equal(r.state.mood, 100)
-})
-
-test('pet-interaction · 喂食生效：小鱼干 -1、饥饿度 +5、anim 切 eating（jumping 行 4）', () => {
+test('pet-interaction · 喂食成功：鱼干 -1、anim 切 eating（jumping 行 4）+ 视图 self=false，一轮后回落 idle', () => {
   const now = T0 + 5000
-  const r = interact(st({ fish: 2, hunger: 40 }), 'feed', now)
+  const r = interact(st({ fish: 2 }), 'feed', now)
   assert.equal(r.ok, true)
   assert.equal(r.state.fish, 1)
-  assert.equal(r.state.hunger, 45)
-  assert.equal(r.feedback.text, TEXT.feedOk) // 卡 15：'呜哇！小鱼干好好吃！'（上游逐字，原为'吃饱啦（饥饿度 +5）'）
-  // anim 契约：eating → 图集第 4 行（jumping），label 中文'喂食'；
-  // 卡 19：真实互动写下的 transientSelf=false ⇒ 视图 anim.self=false（不是自发表演，页面不许折它）
-  const view = buildView(r.state, now)
+  assert.equal(r.anim, 'eating')
+  assert.equal(r.text, '呜哇！小鱼干好好吃！')
+
+  const { state, view } = viewOf(r, now)
   assert.deepEqual(view.anim, { row: 4, label: '喂食', status: 'eating', self: false })
-  assert.equal(r.state.transientSelf, false, '互动写的 transient 来源标记恒为 false')
-  assert.equal(resolveStatus(r.state, now), 'eating')
-  // 瞬时互动播完一轮（1600ms）后回落到属性判定
-  assert.equal(resolveStatus(r.state, now + TRANSIENT_MS.eating), 'idle')
+  assert.equal(resolveStatus(state, now), 'eating')
+  // 真实互动写下的 transient 不折、但一轮播完必须回落待机（v2 没有任何"数值过低"的负面姿态）
+  assert.equal(resolveStatus({ ...state, transientSelf: false }, now + TRANSIENT_MS.eating - 1), 'eating')
+  assert.equal(resolveStatus({ ...state, transientSelf: false }, now + TRANSIENT_MS.eating), 'idle')
 })
 
-test('pet-interaction · 玩耍不耗道具：心情 +5、播放 playing 行动画、两种道具数量不变', () => {
+test('pet-interaction · 洗澡成功：泡泡 -1、anim 切 bathing（waving 行 3）+ 视图 self=false', () => {
   const now = T0 + 5000
-  const r = interact(st({ fish: 0, bubble: 0, mood: 60 }), 'play', now)
-  assert.equal(r.ok, true, '库存为 0 也可玩耍（MUST NOT 消耗道具）')
-  assert.equal(r.state.mood, 65)
-  assert.equal(r.state.fish, 0, '鱼干不变')
-  assert.equal(r.state.bubble, 0, '泡泡不变')
-  assert.deepEqual(buildView(r.state, now).anim, { row: 7, label: '玩耍', status: 'playing', self: false })
+  const r = interact(st({ bubble: 2 }), 'bathe', now)
+  assert.equal(r.ok, true)
+  assert.equal(r.state.bubble, 1)
+  assert.equal(r.state.fish, 3, '洗澡不动鱼干')
+  assert.equal(r.anim, 'bathing')
+  assert.equal(r.text, '泡泡好舒服～洗干净啦！')
+  assert.deepEqual(viewOf(r, now).view.anim, { row: 3, label: '洗澡', status: 'bathing', self: false })
 })
 
-test('pet-interaction · 瞬时互动优先且播完回落：饥饿 <30 时喂食 ⇒ 先 eating，一轮后回落 hungry', () => {
+test('pet-interaction · 成功互动推进各自基准：喂食/洗澡推共享冷却与挂机；点击推点击冷却与挂机', () => {
   const now = T0 + 5000
-  const r = interact(st({ hunger: 20, fish: 1 }), 'feed', now) // hungry 阈值下喂食
-  assert.equal(resolveStatus(r.state, now), 'eating', '瞬时互动优先（播放中不可被打断）')
-  assert.equal(resolveStatus(r.state, now + TRANSIENT_MS.eating - 1), 'eating')
-  assert.equal(resolveStatus(r.state, now + TRANSIENT_MS.eating), 'hungry', '播完回落到按属性判定')
-})
-
-test('pet-interaction · 未知 kind：返回 { ok:false, error:"未知互动: …" } 且状态不变', () => {
-  const s = st()
-  for (const bad of ['dance', '', 'FEED', undefined, null, 42, {}]) {
-    const r = interact(s, bad, T0)
-    assert.equal(r.ok, false)
-    assert.equal(r.error, TEXT.unknownKind(String(bad)))
-    assert.equal(r.state, undefined)
-  }
-  assert.deepEqual(s, st(), '入参未被就地修改')
-})
-
-test('pet-interaction · 气泡契约：成功互动带 2600ms 气泡（feedback 与 view.bubble 同文）', () => {
-  const now = T0 + 5000
-  const r = interact(st(), 'play', now)
-  // 卡 15 换文案（D-16 / 增补 Q13）：原「好开心（心情 +5）」含属性增量数字 ⇒ 废止，改为无数字自拟句
-  assert.equal(r.state.speech.text, '玩得好开心！')
-  assert.equal(r.state.speech.tone, 'good')
-  assert.equal(r.state.speech.until, now + 2600)
-  assert.deepEqual(buildView(r.state, now).bubble, { text: '玩得好开心！', tone: 'good', until: now + 2600 })
-  // 过期气泡 ⇒ view.bubble 为 null（入口不续尸，页面按 until 淡出）
-  assert.equal(buildView(r.state, now + 2601).bubble, null)
-})
-
-test('pet-interaction · 任何成功互动都刷新最近交互时刻（sleep 的退出条件：任一交互发生）', () => {
-  const now = T0 + 5000
-  for (const kind of ['feed', 'bathe', 'play', 'pet']) {
+  for (const kind of ['feed', 'bathe']) {
     const r = interact(st(), kind, now)
-    assert.equal(r.ok, true)
-    assert.equal(r.state.lastInteractAt, now, kind)
+    assert.equal(r.ok, true, kind)
+    assert.equal(r.state.lastInteractAt, now, `${kind}：共享冷却基准推进`)
+    assert.equal(r.state.lastAfkAt, now, `${kind}：挂机计时重新开始（design D-3 硬细节）`)
+    assert.equal(r.state.lastPetAt, 0, `${kind}：不碰点击冷却基准`)
   }
-  // 失败互动（道具不足）不碰状态 ⇒ 不刷新（用户悬停面板时 pet.hit 已负责唤醒，口径见 index.js）
-  const failed = interact(st({ fish: 0 }), 'feed', now)
-  assert.equal(failed.ok, false)
-  assert.equal(failed.state, undefined)
+  const pet = interact(st(), 'pet', now)
+  assert.equal(pet.ok, true)
+  assert.equal(pet.state.lastPetAt, now, '点击推进点击冷却基准')
+  assert.equal(pet.state.lastAfkAt, now)
+  assert.equal(pet.state.lastInteractAt, 0, '点击不碰喂食/洗澡的共享冷却')
+})
+
+test('pet-interaction · 共享冷却期内点击图标：数值不变、仍返回 anim 与「再等等」类文本', () => {
+  const now = T0 + 5000
+  const cooling = st({ lastInteractAt: now - INTERACT_COOLDOWN_MS + 1 })
+  for (const kind of ['feed', 'bathe']) {
+    const r = interact(cooling, kind, now)
+    assert.equal(r.ok, false)
+    assert.equal(r.reason, 'cooling')
+    assert.equal(typeof r.text, 'string', '冷却拒绝也带一句可读文案（不结算 ≠ 没有反馈）')
+    assert.equal(r.anim, undefined, '共享冷却不写任何动画轨（v1 的"失败也播反馈"已随三属性删除）')
+  }
+})
+
+test('pet-interaction · 点击冷却期内：favor 不变，但 anim 仍是 petted 且文本取自冷却集合', () => {
+  const now = T0 + 5000
+  const s = st({ favor: 3, lastPetAt: now - 1000 }) // 1 秒前刚计过分（冷却 1 小时）
+  const r = interact(s, 'pet', now)
+  assert.equal(r.ok, false)
+  assert.equal(r.reason, 'pet-cooling')
+  assert.equal(r.state.favor, 3, '冷却期内好感不变')
+  assert.equal(r.state.lastPetAt, s.lastPetAt, '也不推进冷却基准')
+  assert.equal(r.anim, 'petted', '摸头动画照播（specs/pet-interaction R5）')
+  assert.ok(COOLING_TEXTS.includes(r.text), `冷却文本取自冷却集合：${r.text}`)
+  // 帧契约：petted 用 waving 轨（row 3），与洗澡同轨但不是同一状态
+  const { view } = viewOf(r, now)
+  assert.deepEqual(view.anim, { row: 3, label: '摸头', status: 'petted', self: false })
+  // 冷却结束（恰好满 3600 秒）⇒ 恢复计分
+  const later = interact(s, 'pet', s.lastPetAt + PET_COOLDOWN_MS)
+  assert.equal(later.ok, true)
+  assert.equal(later.state.favor, 4)
+})
+
+test('pet-interaction · 已删除的 kind（含 v1 的第三条互动）不再产生动画或文本：按未知互动拒绝', () => {
+  for (const kind of ['summon', 'hide', 'dance']) {
+    const r = interact(st(), kind, T0)
+    assert.equal(r.ok, false, `${kind} 不是 v2 的合法互动`)
+    assert.equal(r.reason, 'unknown-kind')
+    assert.equal(r.anim, undefined, `${kind} 不产生动画（面板只剩喂食/洗澡两枚图标）`)
+    assert.equal(r.text, undefined, `${kind} 不产生气泡文案（未知互动只记诊断）`)
+  }
 })

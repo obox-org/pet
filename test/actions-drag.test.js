@@ -37,24 +37,21 @@ function captureWarn(t) {
 }
 
 /**
- * 合法 v1 存档文本（position 可覆盖）。
+ * 合法存档文本（position 可覆盖）。
  * `hidden: false` 是卡 15 留下的**废字段**（卡 17 / Q15=B 已撤销隐藏功能）：这里刻意保留，
  * 让每个拖动用例顺带证明"带废字段的旧存档照常读入、不影响拖动"。
+ * 字段集按 v2 的白名单写（design D-1）——不写 v1 的三属性与流水账，那是 persist.test.js 的迁移用例。
  */
 function saveText(overrides = {}) {
   return JSON.stringify({
     schemaVersion: 1,
-    hunger: 100,
-    clean: 100,
-    mood: 100,
     fish: 3,
     bubble: 3,
     growth: 0,
-    hungerDropAcc: 0,
-    cleanDropAcc: 0,
-    recoverAcc: 0,
-    afkAcc: 0,
-    lastSettledAt: T0,
+    favor: 0,
+    lastGrowthAt: T0,
+    lastAfkAt: T0,
+    lastTextAt: T0,
     lastPetAt: 0,
     hidden: false,
     position: null,
@@ -179,13 +176,15 @@ test('卡15 拖动 · setPosition 失败 ⇒ 自记位置不被写坏（下一�
 
 // ————— end 强制落盘 —————
 
-test('卡15 拖动 · end 强制落盘：距上次写盘 <60s 且显示口径签名未变 ⇒ 仍然写 state.json', async (t) => {
-  const { rec, cleanup, advance, tick, mainWrites } = activate(t, {
+test('卡15 拖动 · end 强制落盘：距上次写盘 <60s 且写入签名未变 ⇒ 仍然写 state.json', async (t) => {
+  const { rec, cleanup, advance, mainWrites } = activate(t, {
     files: { 'state.json': saveText({ position: { x: 100, y: 200 } }) }
   })
   await flush()
-  advance(60_000)
-  tick() // 先制造一次"正常"写盘，把节流窗口打开（lastPersistAt = now）
+  // 先制造一次"正常"写盘（一次成功喂食改变整数签名），把节流窗口打开（lastPersistAt = now）。
+  // ⚠️ v2 不能用 `advance(60s) + tick()` 制造这次写盘：空 tick 是 changed=false（不写盘）。
+  const fed = await rec.send('pet.interact', { kind: 'feed' })
+  assert.equal(fed.ok, true)
   await flush(2)
   const before = mainWrites()
   assert.ok(before >= 1, '前置写盘已发生')
@@ -316,31 +315,39 @@ test('卡18 拖动 · 互斥①：拖动中到点不表演（周期定时器不�
   cleanup()
 })
 
-test('卡15 拖动 · 互斥②：拖动持续超过 10 分钟 ⇒ sleep 判定不推进（视图仍是 idle）', async (t) => {
+test('卡15 拖动 · 互斥②（v2 改写）：拖动多久都不刷新共享冷却基准，松手后喂食照常成功', async (t) => {
+  // v1 在这里断言"拖动期间入睡判定不推进"。打盹机制（`sleep` 状态、连续 600 秒无交互）
+  // 已随 design D-10 整体删除，那条断言失去了对象；而 v2 有一条**更硬**的相邻要求：
+  // `lastInteractAt` 只剩"喂食/洗澡的共享冷却基准"一个语义（v1 的 noteInteraction 已删）
+  // ⇒ 拖动（以及悬停）绝不能推它，否则"拖一下窗口"就白送 10 分钟冷却。
   const { rec, cleanup, advance } = activate(t)
   await flush()
-  advance(600_000)
-  assert.equal((await rec.send('pet.state')).state.anim.status, 'sleep', '基线：10 分钟无交互 ⇒ 打盹')
+  const before = (await rec.send('pet.state')).state.items
 
   await rec.send('pet.drag', { phase: 'start' })
-  assert.equal((await rec.send('pet.state')).state.anim.status, 'idle', '按下即唤醒（拖动是用户交互）')
-
-  advance(600_000) // 拖着不放又过 10 分钟
-  const during = await rec.send('pet.state')
-  assert.equal(during.state.anim.status, 'idle', 'D-13：拖动期间 sleep 判定不推进（不报 sleep）')
-
+  advance(600_000) // 拖着不放十分钟
+  assert.equal((await rec.send('pet.state')).state.anim.status, 'idle', '拖动中视图恒为待机（没有打盹）')
   await rec.send('pet.drag', { phase: 'end' })
-  assert.equal((await rec.send('pet.state')).state.anim.status, 'idle', '松手时刷新交互时刻 ⇒ 仍 idle')
   advance(600_000)
-  assert.equal((await rec.send('pet.state')).state.anim.status, 'sleep', '松手后按当前条件重新判定 ⇒ 该睡就睡')
+  assert.equal((await rec.send('pet.state')).state.anim.status, 'idle', '松手后仍然是正常待机')
+
+  // 关键断言：这段拖动没有把共享冷却基准推到"当时"——首次喂食照样成功
+  const fed = await rec.send('pet.interact', { kind: 'feed' })
+  assert.equal(fed.ok, true, '拖动不产生共享冷却（lastInteractAt 未被拖动推进）')
+  assert.equal(fed.state.items.fish, before.fish - 1)
+
+  // 对照：一次真正的成功互动**确实**会开始 10 分钟冷却
+  const again = await rec.send('pet.interact', { kind: 'bathe' })
+  assert.equal(again.ok, false, '成功互动之后立刻再互动 ⇒ 冷却中')
+  assert.equal(again.reason, 'cooling')
   cleanup()
 })
 
 test('卡15 拖动 · 互斥③：拖动期间不弹气泡（view.bubble 恒为 null）', async (t) => {
   const { rec, cleanup } = activate(t)
   await flush()
-  await rec.send('pet.interact', { kind: 'play' })
-  assert.ok((await rec.send('pet.state')).state.bubble, '基线：玩耍成功有气泡')
+  await rec.send('pet.interact', { kind: 'feed' })
+  assert.ok((await rec.send('pet.state')).state.bubble, '基线：喂食成功有气泡')
 
   await rec.send('pet.drag', { phase: 'start' })
   assert.equal((await rec.send('pet.state')).state.bubble, null, 'D-13：拖动期间不弹气泡')

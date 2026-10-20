@@ -41,59 +41,58 @@ function styleOf(sfc) {
   return sfc.slice(start)
 }
 
-// ————— 面板：去属性 + 四按钮（Q13 / design 布局节） —————
+// ————— 面板：去属性 + 两枚图标（design D-8 / Q13） —————
 
-test('卡15 面板 · MUST NOT 渲染三属性：模板与脚本里没有任何属性行/属性条/属性标签', () => {
+test('卡15 面板 · MUST NOT 渲染三属性、也不渲染任何数字：模板与脚本里没有属性行/库存行/数值', () => {
   const tpl = templateOf(panel)
-  for (const banned of ['vital-row', 'vital-bar', 'vital-fill', 'vital-label', 'vital-num', 'vitalRows', 'class="vitals"']) {
+  for (const banned of ['vital-row', 'vital-bar', 'vital-fill', 'vital-label', 'vital-num', 'vitalRows', 'class="vitals"', 'row-items']) {
     assert.ok(!tpl.includes(banned), `面板模板不应再含 "${banned}"（Q13：面板不显示三属性）`)
   }
   // 脚本里也不该再读 state.vitals / 用显示取整函数（属性数值只在设置页由宿主渲染）
   const script = panel.slice(0, panel.indexOf('</script>'))
   assert.ok(!script.includes('state.vitals'), '面板脚本不再读取 state.vitals')
   assert.ok(!script.includes('displayInt'), 'displayInt（属性小条的显示取整）已随属性行删除')
-  assert.ok(!script.includes('TEXT.hunger'), '属性标签文案已删')
   assert.ok(!panel.includes('/100'), '面板不再出现 `{cur}/100` 一类的属性数值')
+  // 库存行整段删除（design D-8：面板上没有一个数字，道具数量只在设置页/背包里体现）
+  assert.equal(tpl.includes('🐟'), false, '库存行已删（面板不显示道具数量）')
+  assert.equal(tpl.includes('🫧'), false)
   // 样式里的三条属性填充色也一并清掉（design 色值表把"属性小条"标为已移除）
   const style = styleOf(panel)
   for (const banned of ['.vital-fill', '#fbbf24', '.vital-bar']) {
     assert.ok(!style.includes(banned), `面板样式不应再含 "${banned}"`)
   }
-  // 等级行与库存行**保留**（design 布局节：面板内顺序 = 等级行 → 库存行 → 四按钮）
-  assert.ok(tpl.includes('row-rank') && tpl.includes('rank-name'), '等级行保留')
-  assert.ok(tpl.includes('row-items') && tpl.includes('🐟') && tpl.includes('🫧'), '库存行保留')
+  // 等级行**保留**（design D-8：面板内顺序 = 等级行 → 两枚图标 → 关闭）
+  assert.ok(tpl.includes('class="level-row"') && tpl.includes('state.values.levelName'), '等级行保留（只读等级名）')
 })
 
-test('卡17 面板 · 三枚图标按钮横向一行、等宽：喂食 / 洗澡 / 玩耍，关闭按钮仍在 DOM 最后（Tab 顺序）', () => {
+test('卡17 面板 · 两枚图标按钮横向一行：喂食 / 洗澡，关闭按钮仍在 DOM 最后（Tab 顺序）', () => {
   const tpl = templateOf(panel)
-  assert.equal(tpl.split('class="act"').length - 1, 3, '恰好三枚 class="act" 按钮（第四枚"隐藏"已删）')
+  assert.equal(tpl.split('class="act"').length - 1, 2, '恰好两枚 class="act" 按钮（v1 的第三枚已删）')
   assert.equal(tpl.includes('TEXT.hide'), false, '面板不再有"隐藏"按钮')
   assert.equal(tpl.includes("emit('hide')"), false)
-  // DOM 顺序 = Tab 顺序：喂食 → 洗澡 → 玩耍 → 关闭面板（关闭按钮必须最后）
-  const order = [':aria-label="TEXT.feed"', ':aria-label="TEXT.bathe"', ':aria-label="TEXT.play"']
+  // DOM 顺序 = Tab 顺序：喂食 → 洗澡 → 关闭面板（关闭按钮必须最后）
+  const order = [':aria-label="TEXT.feed"', ':aria-label="TEXT.bathe"']
   let last = -1
   for (const wiring of order) {
     const at = tpl.indexOf(wiring)
     assert.ok(at > last, `${wiring} 的顺序应在前一枚之后（DOM 顺序 = Tab 顺序）`)
     last = at
   }
-  assert.ok(tpl.indexOf('class="close"') > last, '关闭按钮排在玩耍之后（Tab 最后一站）')
+  assert.ok(tpl.indexOf('class="close"') > last, '关闭按钮排在洗澡之后（Tab 最后一站）')
   // 每枚按钮：aria-label 是中文动作名（可访问名）；**没有常驻文字标签**，动作名只在 `.tip` 浮层里
-  // （卡 18 / Q17：原生 title 已去掉——它要等约 1 秒才出现，还会与浮层形成双提示）
   for (const [kind, name] of [
     ['feed', '喂食'],
-    ['bathe', '洗澡'],
-    ['play', '玩耍']
+    ['bathe', '洗澡']
   ]) {
     assert.ok(tpl.includes(`:aria-label="TEXT.${kind}"`), `${name}：aria-label`)
     assert.equal(tpl.includes(`:title="TEXT.${kind}"`), false, `${name}：不再用原生 title（Q17 自绘浮层）`)
     assert.ok(tpl.includes(`<span class="tip" aria-hidden="true">{{ TEXT.${kind} }}</span>`), `${name}：浮层里有动作名`)
   }
-  assert.equal(tpl.includes(':title='), false, '三枚按钮都不挂原生 title（双提示）')
-  assert.equal((tpl.match(/class="tip"/g) ?? []).length, 3, '三枚按钮各有一个 .tip 浮层')
-  // 内联 SVG：三枚图标 + 不用 <img> / emoji / 图标字体
-  assert.equal((tpl.match(/<svg/g) ?? []).length, 3, '三枚内联 SVG（一枚一个按钮）')
-  assert.equal((tpl.match(/class="icon"/g) ?? []).length, 3, '三枚共用 .icon 规格')
+  assert.equal(tpl.includes(':title='), false, '两枚按钮都不挂原生 title（双提示）')
+  assert.equal((tpl.match(/class="tip"/g) ?? []).length, 2, '两枚按钮各有一个 .tip 浮层')
+  // 内联 SVG：两枚图标 + 不用 <img> / emoji / 图标字体
+  assert.equal((tpl.match(/<svg/g) ?? []).length, 2, '两枚内联 SVG（一枚一个按钮）')
+  assert.equal((tpl.match(/class="icon"/g) ?? []).length, 2, '两枚共用 .icon 规格')
   assert.equal(tpl.includes('<img'), false, '不用 <img> 引外部图标')
   const actions = tpl.slice(tpl.indexOf('<div class="actions">'), tpl.indexOf('<p v-if="syncing"'))
   assert.ok(actions.length > 0, '定位到互动图标行')
@@ -101,12 +100,11 @@ test('卡17 面板 · 三枚图标按钮横向一行、等宽：喂食 / 洗澡 
   const style = styleOf(panel)
   assert.equal(style.includes('@font-face'), false, '不得用图标字体')
   assert.equal(/font-family:\s*['"]?(icon|icomoon|FontAwesome)/i.test(style), false, '不得用图标字体族')
-  // 横向一行、等宽、间距 8px（Q15 / design 布局段）
+  // 横向一行、间距 8px（两枚 28×28 固定尺寸，远窄于 200px 面板）
   const css = style.slice(style.indexOf('.actions {'), style.indexOf('.close {'))
-  assert.match(css, /flex-direction: row/, '三枚按钮横向一行（不再是纵排）')
+  assert.match(css, /flex-direction: row/, '两枚按钮横向一行（不是纵排）')
   assert.match(css, /gap: 8px/, '按钮间距 8px')
-  assert.match(css, /flex: 1 1 0/, '三枚等宽（均分面板宽度）')
-  // 图标规格逐字：22px、fill none、stroke 白色（卡 18 / Q17）、线宽 1.6、圆头圆角
+  // 图标规格逐字：22px、fill none、stroke 白色（Q17）、线宽 1.6、圆头圆角
   const iconBlock = style.slice(style.indexOf('.icon {'))
   assert.match(iconBlock, /width: 22px/)
   assert.match(iconBlock, /height: 22px/)
@@ -117,19 +115,19 @@ test('卡17 面板 · 三枚图标按钮横向一行、等宽：喂食 / 洗澡 
   assert.match(iconBlock, /stroke-linejoin: round/)
 })
 
-test('卡18 面板 · 图标按钮：底色透明（无渐变）、悬浮极淡白叠加 + 描边高亮、白色 2px 焦点环（Q17）', () => {
+test('卡18 面板 · 图标按钮：底色透明（无渐变）、悬浮 token 背景 + 描边高亮、白色 2px 焦点环（Q17）', () => {
   const style = styleOf(panel)
   const act = style.slice(style.indexOf('.act {'), style.indexOf(".act[aria-disabled='true']"))
   assert.match(act, /background: transparent/, 'Q17：按钮底色透明')
   assert.equal(style.includes('linear-gradient'), false, 'Q17：那层青色渐变底已删（产物 grep 同步为 0）')
   assert.equal(style.includes('#7dd3fc'), false, '渐变用的两个色值一并清掉')
   assert.equal(style.includes('#38bdf8'), false, '（保留的只有白色线条与白色焦点环）')
-  // 悬浮：极淡白叠加 + 描边高亮；禁用态排除在外（置灰的那一枚不该"看起来可用"）
-  const hover = style.slice(style.indexOf(":hover"), style.indexOf('.act[aria-disabled'))
-  assert.match(hover, /rgba\(255, 255, 255, 0\.08\)/, '极淡白叠加 rgba(255,255,255,.08)')
-  assert.match(hover, /border-color: rgba\(255, 255, 255, 0\.28\)/, '描边高亮（恒占 1px 边框槽位，不跳尺寸）')
+  // 悬浮：宿主 token 的悬停背景 + 描边高亮；禁用态排除在外（置灰的那一枚不该"看起来可用"）
   assert.match(style, /\.act:not\(\[aria-disabled='true'\]\):hover/, '悬停高亮排除禁用态')
-  // 焦点环改成白色 2px（Q17）
+  const hover = style.slice(style.indexOf(".act:not([aria-disabled='true']):hover"), style.indexOf(".act[aria-disabled='true']"))
+  assert.match(hover, /background: var\(--hover-bg\)/, '悬停背景用宿主 token（design 硬约束 1：零自造色值）')
+  assert.match(hover, /border-color: var\(--border\)/, '描边高亮用宿主 token')
+  // 焦点环是白色 2px（Q17）
   const focusBlock = style.slice(style.indexOf('.act:focus-visible'), style.indexOf('.tip {'))
   assert.match(focusBlock, /box-shadow: 0 0 0 2px #ffffff/, '白色 2px 焦点环')
   assert.equal(/\.act:focus-visible[^}]*rgba\(56, 189, 248/.test(style), false, '旧的青色焦点环已换掉')
@@ -139,14 +137,14 @@ test('卡18 面板 · 图标按钮：底色透明（无渐变）、悬浮极淡�
   assert.match(off.slice(0, 200), /cursor: not-allowed/)
 })
 
-test('卡18 面板 · 悬浮浮层 .tip：定位在图标上方、玻璃底 + 白字 + 6px 圆角，hover/focus-visible 即时可见（无延迟）', () => {
+test('卡18 面板 · 悬浮浮层 .tip：定位在图标上方、token 玻璃底 + token 文字 + 6px 圆角，hover/focus-visible 即时可见（无延迟）', () => {
   const style = styleOf(panel)
   const tip = style.slice(style.indexOf('.tip {'), style.indexOf('.icon {'))
   assert.ok(tip.length > 0, '.tip 浮层样式存在')
   assert.match(tip, /position: absolute/, '自绘浮层（不是原生 title）')
   assert.match(tip, /bottom: calc\(100% \+ 6px\)/, '定位在图标上方')
-  assert.match(tip, /background: rgba\(15, 23, 42, 0\.92\)/, '玻璃底（与面板同族色值）')
-  assert.match(tip, /color: #ffffff/, '白字')
+  assert.match(tip, /background: var\(--bg-panel\)/, '玻璃底用宿主 token（不新造色值）')
+  assert.match(tip, /color: var\(--fg-bright\)/, '文字用宿主 token')
   assert.match(tip, /border-radius: 6px/, '6px 圆角')
   assert.match(tip, /pointer-events: none/, '浮层不吃指针')
   // 即时显示：`visibility` 从 hidden 直接切到 visible，且**没有任何 transition / delay**
@@ -166,15 +164,14 @@ test('卡18 面板 · 悬浮浮层 .tip：定位在图标上方、玻璃底 + �
 test('卡17 面板 · 禁用态：道具不足用 aria-disabled（不是 disabled 属性）⇒ 仍可聚焦，且点击被拦在事件里', () => {
   const tpl = templateOf(panel)
   const script = panel.slice(0, panel.indexOf('</script>'))
-  // 喂食/洗澡按库存禁用；玩耍不耗道具 ⇒ 永不置灰
+  // 喂食/洗澡按库存禁用（v2 只有这两枚耗道具的图标；不再有"玩耍永不置灰"那一条）
   assert.match(script, /feed: props\.state\.items\.fish < 1/, '喂食：无小鱼干即不可用')
   assert.match(script, /bathe: props\.state\.items\.bubble < 1/, '洗澡：无沐浴泡泡即不可用')
-  assert.match(script, /play: false/, '玩耍不耗道具 ⇒ 永不禁用')
   // 用 aria-disabled（键盘可达）而不是 disabled 属性（会被移出 Tab 序列）
-  assert.equal((tpl.match(/:aria-disabled=/g) ?? []).length, 3, '三枚都按可用性输出 aria-disabled')
+  assert.equal((tpl.match(/:aria-disabled=/g) ?? []).length, 2, '两枚都按可用性输出 aria-disabled')
   assert.equal(tpl.includes(':disabled='), false, '不使用 disabled 属性（否则禁用时键盘够不到、读屏也不念）')
   // aria-disabled 只是语义：点击仍会派发 ⇒ 拦截必须写在事件处理里
-  assert.match(script, /function onAct\(kind: 'feed' \| 'bathe' \| 'play'\): void \{/, '有统一的点击出口')
+  assert.match(script, /function onAct\(kind: 'feed' \| 'bathe'\): void \{/, '有统一的点击出口')
   assert.match(script, /if \(blocked\.value\[kind\]\) return/, '道具不足时点击被就地拦下（不发请求）')
   assert.ok(
     script.includes('aria-disabled') && script.includes('仍会派发 click'),
@@ -186,11 +183,11 @@ test('卡17 面板 · 禁用态：道具不足用 aria-disabled（不是 disable
   assert.match(off.slice(0, 200), /opacity: 0\.45/, '禁用态 opacity .45（色值表）')
   assert.match(off.slice(0, 200), /cursor: not-allowed/, '禁用态 cursor: not-allowed')
   assert.equal(/\.icon\s*\{[^}]*opacity/.test(style), false, '禁用只调按钮透明度，不改图标形状/配色')
-  // 焦点必然落进面板：三枚都可用 aria-disabled ⇒ 第一枚恒可聚焦（不再需要"顺延到第一个可用按钮"）
+  // 焦点必然落进面板：两枚都可用 aria-disabled ⇒ 第一枚恒可聚焦（不再需要"顺延到第一个可用按钮"）
   assert.match(script, /buttons\[0\] \?\? closeBtn\.value/, '焦点落第一枚（喂食）')
 })
 
-test('卡15 面板 · 不接主题桥、不用背景模糊滤镜（design D-6 / D-11 复核第 3 条）', () => {
+test('卡15 面板 · 只用宿主 token、不接主题桥、不用背景模糊滤镜（design 硬约束 1/2 + D-11 复核第 3 条）', () => {
   for (const [name, src] of [
     ['PetPanel.vue', panel],
     ['App.vue', app],
@@ -199,8 +196,17 @@ test('卡15 面板 · 不接主题桥、不用背景模糊滤镜（design D-6 / 
   ]) {
     assert.ok(!src.includes('backdrop-filter'), `${name} 不得出现 backdrop-filter`)
     assert.ok(!src.includes('installThemeBridge'), `${name} 不得接主题桥`)
-    assert.ok(!src.includes('var(--'), `${name} 不得引用宿主主题 token`)
   }
+  // v2（design 的 UI 视觉规范）只用宿主 token：面板配色全部走 `var(--…)`，
+  // 白色只允许出现在"图标描边 / 焦点环"两处用户明确要求的位置。
+  assert.match(styleOf(panel), /var\(--bg-panel\)/, '面板底用 --bg-panel')
+  assert.match(styleOf(panel), /var\(--fg-dim\)/, '次要文字用 --fg-dim')
+  assert.match(styleOf(panel), /var\(--border\)/, '边框用 --border')
+  const style = styleOf(panel)
+  const hexColors = style.match(/#[0-9a-fA-F]{3,8}/g) ?? []
+  assert.deepEqual([...new Set(hexColors)], ['#ffffff'], '除白色线条/焦点环外没有自造色值')
+  const rgbColors = style.match(/rgba?\([^)]*\)/g) ?? []
+  assert.deepEqual(rgbColors, [], '没有 rgba 形式的自造色值（全部改走 token）')
 })
 
 // ————— 卡 17（Q15=B）：页面不再有"只画一个小按钮"的中间形态 —————
@@ -250,12 +256,12 @@ test('卡17 移除 · 页面状态契约去掉 hidden：PetStateView / normalize
   assert.equal(stateTs.includes('hidden: boolean'), false, 'PetStateView 不再声明 hidden')
   assert.equal(stateTs.includes('obj.hidden'), false, 'normalizeState 不再归一 hidden')
   assert.equal(stateTs.includes('hidden: false'), false, 'DEFAULT_STATE 不再有 hidden 缺省值')
-  // 归一化后的键集合就是契约（入口侧同款断言在 test/actions-hidden.test.js）
+  // 归一化后的键集合就是契约（入口侧同款断言在 test/extension.test.js 的 PetStateView 形状用例）
   const keys = stateTs
-    .slice(stateTs.indexOf('export interface PetStateView'), stateTs.indexOf('export const RANK_NAMES'))
+    .slice(stateTs.indexOf('export interface PetStateView'), stateTs.indexOf('export const BUBBLE_MS'))
     .match(/^\s{2}\w+:/gm)
     ?.map((line) => line.trim().replace(':', ''))
-  assert.deepEqual(keys, ['vitals', 'items', 'growth', 'anim', 'bubble'], '契约只剩五键')
+  assert.deepEqual(keys, ['items', 'values', 'anim', 'bubble'], 'v2 契约恰好四键（vitals 与 growth 三件套已删）')
 })
 
 // ————— 拖动接线（D-13） —————
@@ -334,15 +340,20 @@ test('卡18 · 页面映射：trot→running(7)、run-left→running-left(2)、r
   assert.match(animTs, /原地小跑: 'trot'/, '中文 label 反查表（与入口 STATUS_LABEL 逐字一致）')
   assert.match(animTs, /向左小跑: 'run-left'/, 'run-left 的中文 label')
   assert.match(animTs, /向右小跑: 'run-right'/, 'run-right 的中文 label')
-  assert.match(animTs, /sleep: 3,\s*\n\s*trot: 2,\s*\n\s*'run-left': 2,\s*\n\s*'run-right': 2,\s*\n\s*idle: 1/, '优先级：状态指示轨 > 三条表演轨（同档 2）> idle')
+  // v2 的优先级表只剩八项：瞬时互动 9 > 三条表演轨（同档 2）> idle 1（没有属性轨/打盹档位了）
+  assert.match(
+    animTs,
+    /eating: 9,\s*\n\s*bathing: 9,\s*\n\s*playing: 9,\s*\n\s*petted: 9,\s*\n\s*trot: 2,\s*\n\s*'run-left': 2,\s*\n\s*'run-right': 2,\s*\n\s*idle: 1/,
+    '优先级：瞬时互动 > 三条表演轨（同档 2）> idle'
+  )
   for (const status of ['trot', 'run-left', 'run-right']) {
     assert.ok(animTs.includes(`| '${status}'`), `PetStatus 含 ${status}`)
   }
-  // 页面侧的"播一轮即回落"集合含三条表演轨（与入口的权威集合**有意不同**，理由写在注释里）
+  // 页面侧的"播完一轮就回落"集合是七条表演轨（v2 起与入口的瞬时集合完全相同）
   const setAt = animTs.indexOf('const TRANSIENT_SET')
   const setBody = animTs.slice(setAt, animTs.indexOf(']', setAt))
-  for (const status of ['trot', 'run-left', 'run-right']) {
-    assert.match(setBody, new RegExp(`'${status}'`), `页面把 ${status} 当"播一轮就回落"处理`)
+  for (const status of ['eating', 'bathing', 'playing', 'petted', 'trot', 'run-left', 'run-right']) {
+    assert.match(setBody, new RegExp(`'${status}'`), `页面把 ${status} 当"播完一轮就回落"处理`)
   }
   assert.match(animTs.slice(0, setAt), /有意不同/, '注释说明与入口集合的差异（防后人"对齐"错）')
   // 卡 19（热修 D-1）：页面侧的"状态字符串来源判据"（isSelfBurst / SELF_BURST_SET）已整条删除——
@@ -352,6 +363,12 @@ test('卡18 · 页面映射：trot→running(7)、run-left→running-left(2)、r
   // 断言"声明已删"而不是"整个文件不含该字样"：历史注疏里保留旧名是为了让后人看懂为什么删。
   assert.equal(/export function isSelfBurst\s*\(/.test(animTs), false, 'isSelfBurst 声明已删（防回归）')
   assert.equal(/SELF_BURST_SET\s*[:=]/.test(animTs), false, '同名集合声明已删（防回归）')
+  // v2 的 kind → 状态表只有三种（喂食/洗澡/点击）；v1 的第三种互动已随面板只剩两枚图标删除
+  assert.match(
+    animTs,
+    /export const KIND_TO_STATUS: Record<'feed' \| 'bathe' \| 'pet', PetStatus> = \{\s*\n\s*feed: 'eating',\s*\n\s*bathe: 'bathing',\s*\n\s*pet: 'petted'/,
+    'KIND_TO_STATUS 恰好 feed/bathe/pet'
+  )
 })
 
 test('卡18/22 · 页面周期镜像 = 1 分钟（60 秒）；且它有真实消费者（锁存看门狗），不是装饰常量', () => {

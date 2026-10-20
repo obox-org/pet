@@ -82,15 +82,18 @@ test('pet-window · visible 关 ⇒ 调 api.overlay.destroy（不是 setMouseThr
 })
 
 test('pet-window · visible 开 ⇒ 重新 create 且状态连续（不重置、不读档回旧值）', async (t) => {
-  const { api, rec, cleanup, advance } = activate(t)
+  const { api, rec, cleanup } = activate(t)
   await flush()
 
-  // 关窗前先让状态漂移：60s 结算 ⇒ hunger 99（若重建后回到 100 即"状态不连续"）
-  advance(60_000)
-  rec.timers.get('pet-tick').cb()
+  // 关窗前先让数值漂移：一次成功喂食 ⇒ 成长/好感各 +1、鱼干 -1
+  //（若重建后回到 0/0/3 即"状态不连续"；关窗不写盘也不重读档，所以内存状态必须是连续的）
+  const fed = await rec.send('pet.interact', { kind: 'feed' })
+  assert.equal(fed.ok, true)
   await flush(2)
   const before = await rec.send('pet.ready')
-  assert.equal(before.state.vitals.hunger, 99)
+  assert.equal(before.state.values.growth, 1)
+  assert.equal(before.state.values.favor, 1)
+  assert.equal(before.state.items.fish, 2)
 
   api.settings.set('pet.visible', false)
   await flush()
@@ -100,7 +103,9 @@ test('pet-window · visible 开 ⇒ 重新 create 且状态连续（不重置、
   assert.ok(rec.overlays.has('pet.overlay'))
 
   const after = await rec.send('pet.ready')
-  assert.equal(after.state.vitals.hunger, 99, '状态连续：与关窗前经结算后的值一致')
+  assert.equal(after.state.values.growth, 1, '状态连续：成长值与关窗前一致')
+  assert.equal(after.state.values.favor, 1, '状态连续：好感与关窗前一致')
+  assert.equal(after.state.items.fish, 2, '状态连续：道具数量与关窗前一致')
   cleanup()
 })
 
@@ -158,22 +163,31 @@ test('pet-window · 创建失败 ⇒ 状态栏 + 诊断位"宠物窗体创建失
   cleanup()
 })
 
-test('pet-window · 关窗不停结算时钟：销毁后 pet-tick 仍在、属性继续衰减（D-5：仅挂机暂停）', async (t) => {
+test('pet-window · 关窗即停时钟：销毁后五只定时器全清，且两个累积基准被推到关窗时刻（关窗不计成长/挂机）', async (t) => {
   const { api, rec, cleanup, advance } = activate(t)
   await flush()
   api.settings.set('pet.visible', false)
   await flush()
-  assert.equal(rec.overlays.size, 0)
-  assert.ok(rec.timers.has('pet-tick'), '结算时钟不受窗体销毁影响')
-
-  advance(60_000)
-  rec.timers.get('pet-tick').cb()
   await flush(2)
-  // 窗体已关，页面不存在，但三属性照写设置键（设置页 progress 仍随衰减更新）
-  const hungerWrites = rec.settingsLog.filter(([k]) => k === 'pet.hunger')
-  assert.equal(hungerWrites.at(-1)[1], 99, '关窗期间属性继续衰减（-1/分钟）')
+  assert.equal(rec.overlays.size, 0)
+  // v2 的定时器跟着窗体生命周期走（design D-3 的"清理"列）：tick / perf / text 与两只一次性
+  // 定时器全由 stopClocks 清掉，关窗期间不再空转（v1 曾让 pet-tick 常驻、每 15 秒写一次属性）
+  assert.equal(rec.timers.size, 0, '销毁窗体后没有任何定时器残留')
+  assert.equal(rec.timers.has('pet-tick'), false, '结算时钟随窗体一起清')
+
+  // 关窗期间"不计成长、不发挂机"的唯一实现点：销毁路径把基准推到当时并强制落盘
+  const persisted = JSON.parse(rec.fs.get('state.json'))
+  assert.equal(persisted.lastGrowthAt, T0, 'lastGrowthAt 已推进到关窗时刻')
+  assert.equal(persisted.lastAfkAt, T0, 'lastAfkAt 已推进到关窗时刻')
+  assert.equal(persisted.growth, 0)
+
+  // 关窗三小时再开：成长值不补涨（基准在关窗那一刻）；挂机奖励也不补发
+  advance(3 * 3_600_000)
+  api.settings.set('pet.visible', true)
+  await flush()
   const ready = await rec.send('pet.ready')
-  assert.equal(ready.state.items.fish, 3, '挂机暂停：无产出（economy 另有专测）')
+  assert.equal(ready.state.values.growth, 0, '关窗三小时不涨成长值（specs/pet-values R1）')
+  assert.equal(ready.state.items.fish, 3, '关窗期间不挂机（specs/pet-economy）')
   cleanup()
 })
 
@@ -186,16 +200,16 @@ test('pet-window · 重复激活（停用后再启用）：先 cleanup 再注册
   // 宿主重复激活 = 再调一次插件函数（同一 api 面）
   const cleanup2 = pet(api)
   await flush()
-  // 卡 15 起入口有两只定时器：结算时钟 pet-tick + 自发动作；卡 18（Q16）起第二只从
-  // 一次性 `pet-trot` 换成周期性的 `pet-perf`（每 1 分钟（60 秒）随机表演一轮；卡 22 前是 10 秒）。
-  // 断言"只有一份"要按 id 数，不能只看 size —— 同 id 重复 setInterval/setTimeout 会被宿主重置，不叠加。
-  assert.equal(rec.timers.size, 2, '一份 pet-tick + 一份 pet-perf（无双份）')
+  // v2 有三只**周期**定时器：结算 pet-tick（60 秒）+ 随机表演 pet-perf（60 秒）+ 定时文本 pet-text（300 秒）。
+  // 断言"只有一份"要按 id 数，不能只看 size —— 同 id 重复 setInterval 会被宿主重置，不叠加。
+  assert.equal(rec.timers.size, 3, '一份 pet-tick + 一份 pet-perf + 一份 pet-text（无双份）')
   assert.ok(rec.timers.has('pet-tick'), 'pet-tick 只有一份')
   assert.ok(rec.timers.has('pet-perf'), 'pet-perf 只有一份')
+  assert.ok(rec.timers.has('pet-text'), 'pet-text 只有一份')
   assert.equal(rec.overlays.size, 1, 'overlay 只有一份（同 id 重复创建会被宿主拒绝，入口未触发该路径）')
   assert.equal(countLog(rec, 'create'), 2)
   cleanup2()
-  assert.equal(rec.timers.size, 0, 'cleanup 把两只定时器都清了（含 pet-perf，Q16"周期定时器，cleanup 清"）')
+  assert.equal(rec.timers.size, 0, 'cleanup 把三只周期定时器都清了')
 })
 
 test('pet-window · 读档期间停用（init 竞态）：disposed 短路 ⇒ 窗体不建、时钟不起、消息面释放', async (t) => {
@@ -244,13 +258,15 @@ test('pet-window · pet.hit ⇒ setMouseThrough(!inside)：命中关穿透、移
   cleanup()
 })
 
-test('pet-window · 悬停唤醒：睡够 10 分钟后 pet.hit{inside:true} ⇒ sleep→idle 并立即唤醒挂起的订阅', async (t) => {
+test('pet-window · 长时间无交互仍活跃：两小时没互动也是 idle（无打盹），pet.hit 不改变状态', async (t) => {
   const { rec, cleanup, advance } = activate(t)
   await flush()
 
-  advance(600_000) // 连续 10 分钟无交互 ⇒ 入睡（无需 tick：sleep 是构建视图时判定的派生状态）
-  const sleeping = await rec.send('pet.state')
-  assert.deepEqual(sleeping.state.anim, { row: 0, label: '打盹', status: 'sleep', self: false })
+  // specs/pet-sprites R2：v1 的"连续 600 秒无交互 ⇒ 打盹"机制已整体移除，
+  // 长时间无交互时宠物保持正常待机与正常节拍（不再有 sleep 状态，也没有 1.5× 慢放）。
+  advance(2 * 3_600_000)
+  const idle = await rec.send('pet.state')
+  assert.deepEqual(idle.state.anim, { row: 0, label: '待机', status: 'idle', self: false })
 
   let subReply
   const sub = rec.send('pet.subscribe', { rev: 0 }).then((r) => {
@@ -259,10 +275,19 @@ test('pet-window · 悬停唤醒：睡够 10 分钟后 pet.hit{inside:true} ⇒ 
   await flush(2)
   assert.equal(subReply, undefined, '状态没变 ⇒ 订阅继续 hold')
 
-  await rec.send('pet.hit', { inside: true }) // 悬停算交互（D-4 触发列含悬停）
+  // 悬停**不再**算一次交互：v2 的 lastInteractAt 只剩"共享冷却基准"一个语义，
+  // 悬停若推它就会白送一次 10 分钟冷却（因此 pet.hit 只切穿透态，不产生状态变化）
+  const hit = await rec.send('pet.hit', { inside: true })
+  assert.deepEqual(hit, { ok: true })
+  await flush(2)
+  assert.equal(subReply, undefined, '悬停不产生状态变化 ⇒ 长轮询不被唤醒')
+
+  // 反向自检：真正的状态变化（成功喂食）才唤醒订阅
+  const fed = await rec.send('pet.interact', { kind: 'feed' })
+  assert.equal(fed.ok, true)
   await sub
   assert.equal(subReply.ok, true)
-  assert.equal(subReply.rev, 1, '状态可见变化（sleep→idle）⇒ rev+1 并唤醒')
-  assert.deepEqual(subReply.state.anim, { row: 0, label: '待机', status: 'idle', self: false })
+  assert.ok(subReply.rev >= 1, '状态真的变了 ⇒ rev 推进并唤醒')
+  assert.equal(subReply.state.anim.status, 'eating', '唤醒回包带最新视图（喂食这一轮）')
   cleanup()
 })

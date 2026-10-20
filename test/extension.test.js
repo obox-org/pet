@@ -105,12 +105,12 @@ test('mock api 范式（guides-user.md:272-299）：overlay{create,destroy,setMo
 
 // ————— 激活注册面 —————
 
-test('入口 · 激活注册：pet-tick 15 秒定时器 + 消息处理器 + 状态栏初始文本"宠物"', async (t) => {
+test('入口 · 激活注册：pet-tick 60 秒定时器 + 消息处理器 + 状态栏初始文本"宠物"', async (t) => {
   const { rec, cleanup } = activate(t)
   await flush()
   const timer = rec.timers.get('pet-tick')
   assert.ok(timer, 'settle 时钟已注册')
-  assert.equal(timer.seconds, 15, 'api.timer 单位是秒（api-reference.md:405-414）；design D-5 的 15s tick')
+  assert.equal(timer.seconds, 60, 'api.timer 单位是秒（api-reference.md:405-414）；v2 的 tick 为 60 秒')
   assert.equal(typeof rec.messageHandler, 'function')
   assert.equal(rec.statusTexts.get('pet.status'), '宠物')
   cleanup()
@@ -120,28 +120,23 @@ test('入口 · 激活注册：pet-tick 15 秒定时器 + 消息处理器 + 状�
 
 // ————— D-3 通道表 —————
 
-test('消息路由 · pet.ready / pet.state ⇒ { ok:true, state:PetStateView }（D-3 形状逐字段）', async (t) => {
+test('消息路由 · pet.ready / pet.state ⇒ { ok:true, state:PetStateView }（v2 四字段形状逐字段）', async (t) => {
   const { rec, cleanup } = activate(t)
   await flush()
   for (const channel of ['pet.ready', 'pet.state']) {
     const r = await rec.send(channel) // pet.ready 无载荷
     assert.equal(r.ok, true, channel)
-    assert.deepEqual(Object.keys(r.state).sort(), ['anim', 'bubble', 'growth', 'items', 'vitals'])
-    assert.equal('hidden' in r.state, false, '卡 17（Q15=B）：PetStateView 不再有 hidden 键')
-    assert.deepEqual(Object.keys(r.state.vitals).sort(), ['clean', 'hunger', 'mood'])
+    // v2 顶层恰好四键：items / values / anim / bubble（v1 的 vitals 与 growth 三件套已删）
+    assert.deepEqual(Object.keys(r.state).sort(), ['anim', 'bubble', 'items', 'values'])
+    assert.equal('hidden' in r.state, false, 'PetStateView 不再有 hidden 键')
+    assert.equal('vitals' in r.state, false, '三属性视图已随 specs/pet-vitals 删除')
     assert.deepEqual(Object.keys(r.state.items).sort(), ['bubble', 'fish'])
-    assert.deepEqual(Object.keys(r.state.growth).sort(), ['rank', 'rankName', 'value'])
-    // 卡 19 起 anim 多一项来源标记 self（无 transient ⇒ false），是"页面折不折 idle"的唯一判据
+    assert.deepEqual(Object.keys(r.state.values).sort(), ['favor', 'growth', 'level', 'levelName'])
     assert.deepEqual(Object.keys(r.state.anim).sort(), ['label', 'row', 'self', 'status'])
-    assert.deepEqual(
-      r.state.anim,
-      { row: 0, label: '待机', status: 'idle', self: false },
-      '初始全满 ⇒ idle'
-    )
+    assert.deepEqual(r.state.anim, { row: 0, label: '待机', status: 'idle', self: false }, '初始 ⇒ idle')
     assert.equal(r.state.bubble, null)
-    assert.deepEqual(r.state.vitals, { hunger: 100, clean: 100, mood: 100 })
     assert.deepEqual(r.state.items, { fish: 3, bubble: 3 })
-    assert.deepEqual(r.state.growth, { value: 0, rank: 0, rankName: '幼鲸' })
+    assert.deepEqual(r.state.values, { growth: 0, favor: 0, level: 1, levelName: '初次见面' })
   }
   cleanup()
 })
@@ -155,26 +150,31 @@ test('消息路由 · 未知通道 ⇒ { ok:false, error:"未知通道: …" }�
   cleanup()
 })
 
-test('消息路由 · pet.interact 四种 kind 都走通：feed/bathe/play/pet ⇒ { ok:true, state, feedback }', async (t) => {
+test('消息路由 · pet.interact 三种 kind 都走通：feed/bathe/pet ⇒ { ok:true, state, feedback }', async (t) => {
   const { rec, cleanup, advance } = activate(t)
   await flush()
-  const kinds = ['feed', 'bathe', 'play', 'pet']
+  // v2 的合法互动只有三种（`play` 已随"面板只剩两枚图标"删除，属未知互动）；
+  // feed/bathe 共享 10 分钟冷却、pet 是 1 小时独立冷却 ⇒ 每次之间推进 1 小时让全部走成功分支。
+  const kinds = ['feed', 'bathe', 'pet']
   for (const kind of kinds) {
-    advance(300_001) // 让 pet 的冷却在多次点击间到期，四种 kind 全部走成功分支
+    advance(3_600_000)
     const r = await rec.send('pet.interact', { kind })
     assert.equal(r.ok, true, kind)
-    assert.equal(r.feedback.kind, kind)
-    assert.equal(typeof r.feedback.text, 'string')
-    assert.ok(['good', 'bad'].includes(r.feedback.tone))
-    assert.ok(r.state && r.state.vitals, '成功回包带最新 PetStateView（页面据此重绘）')
+    assert.equal(typeof r.feedback.text, 'string', `${kind}：回包带一条可读反馈`)
+    assert.equal(r.feedback.tone, 'good')
+    assert.ok(r.state && r.state.values, '成功回包带最新 PetStateView（页面据此重绘）')
   }
+  // 未知 kind（含 v1 已删的第三方互动）一律按未知互动拒绝——判定细节归 test/interaction-v2.test.js
+  const bogus = await rec.send('pet.interact', { kind: 'dance' })
+  assert.equal(bogus.ok, false)
+  assert.equal(bogus.error, '未知互动: dance')
   cleanup()
 })
 
 // ————— 长轮询（D-3 的 S1 解法） —————
 
 test('长轮询 · 入口端到端：hold 到状态变化 ⇒ rev+1 唤醒；陈旧 rev 立即补发；重订阅再挂起', async (t) => {
-  const { rec, cleanup, advance, tick } = activate(t)
+  const { rec, cleanup } = activate(t)
   await flush()
 
   let reply0
@@ -184,12 +184,17 @@ test('长轮询 · 入口端到端：hold 到状态变化 ⇒ rev+1 唤醒；陈
   await flush(2)
   assert.equal(reply0, undefined, 'rev 一致 ⇒ hold 不回包')
 
-  advance(60_000)
-  tick() // 结算改变状态 ⇒ rev=1 ⇒ 唤醒（先落定再唤醒，D-8 次序）
+  // 一次成功喂食改变状态 ⇒ rev=1 ⇒ 唤醒（先落定再唤醒，D-8 次序）。
+  // ⚠️ 这里**不能**用 `advance(60_000) + tick()`：v2 的 tick 只在"满整小时/满 1200 秒"时
+  // 才改变数值，60 秒的空 tick 是 changed=false（不 rev++、不唤醒）——用它当唤醒源会让
+  // 本用例真的等满 25 秒的 hold 超时，整仓测试从秒级退化到半分钟级。
+  const fed = await rec.send('pet.interact', { kind: 'feed' })
+  assert.equal(fed.ok, true)
   await p0
   assert.equal(reply0.ok, true)
   assert.equal(reply0.rev, 1)
-  assert.equal(reply0.state.vitals.hunger, 99, '唤醒回包带最新状态')
+  assert.equal(reply0.state.values.favor, 1, '唤醒回包带最新状态')
+  assert.equal(reply0.state.anim.status, 'eating', '喂食这一轮正在播')
 
   // 页面落后（rev 陈旧）⇒ 立即补发当前状态，不 hold
   const stale = await rec.send('pet.subscribe', { rev: 0 })
@@ -228,7 +233,7 @@ test('长轮询 · 25s 超时端到端：入口自回相同 rev（页面不重�
   await p
   assert.equal(reply.ok, true, '超时是**正常回包**，不是错误')
   assert.equal(reply.rev, 0, '相同 rev ⇒ 页面不重绘')
-  assert.deepEqual(reply.state.vitals, { hunger: 100, clean: 100, mood: 100 })
+  assert.deepEqual(reply.state.values, { growth: 0, favor: 0, level: 1, levelName: '初次见面' })
   cleanup()
 })
 
@@ -241,7 +246,7 @@ test('负向 · overlay 已销毁时收到 interact ⇒ { ok:false, error:"宠�
   api.settings.set('pet.visible', false)
   await flush()
 
-  for (const kind of ['feed', 'bathe', 'play', 'pet']) {
+  for (const kind of ['feed', 'bathe', 'pet']) {
     const r = await rec.send('pet.interact', { kind })
     assert.deepEqual(r, { ok: false, error: '宠物窗体已关闭' }, kind)
   }
@@ -261,7 +266,8 @@ test('负向 · pet.interact 未知 kind ⇒ { ok:false, error:"未知互动: �
   assert.equal(r.state, undefined, '失败回包不携带状态')
 
   const after = await rec.send('pet.ready')
-  assert.deepEqual(after.state.vitals, { hunger: 100, clean: 100, mood: 100 }, '状态未被污染')
+  assert.equal(after.state.values.growth, 0, '数值未被污染')
+  assert.equal(after.state.values.favor, 0)
   assert.deepEqual(after.state.items, { fish: 3, bubble: 3 })
   cleanup()
 })
@@ -291,50 +297,40 @@ test('负向 · pet.hit 畸形载荷 ⇒ 一律 { ok:true } 且穿透态不被�
 
 // ————— R7 写盘节流 —————
 
-test('写盘节流（design R7）：显示口径值未变且距上次写盘 <60s ⇒ 跳过；值变化或满 60s ⇒ 写', async (t) => {
-  // 种子：hunger 1.2 / clean 0.5 / mood 0（growth 速率 0，无联动触发，签名只剩浮点零头在动）
-  const save = JSON.stringify({
-    schemaVersion: 1,
-    hunger: 1.2,
-    clean: 0.5,
-    mood: 0,
-    fish: 3,
-    bubble: 3,
-    growth: 0,
-    hungerDropAcc: 0,
-    cleanDropAcc: 0,
-    recoverAcc: 0,
-    afkAcc: 0,
-    lastSettledAt: T0,
-    lastPetAt: 0
-  })
-  const { rec, cleanup, advance, tick } = activate(t, { files: { 'state.json': save } })
+test('写盘节流（design R7）：整数签名未变且距上次写盘 <60s ⇒ 跳过；满 60s 的时间臂 ⇒ 写', async (t) => {
+  const { rec, cleanup, advance } = activate(t)
   await flush()
   const mainWrites = () => rec.fsLog.filter(([op, p]) => op === 'writeFile' && p === 'state.json').length
 
-  advance(20_000)
-  tick() // hunger floor 1→0 ⇒ 显示口径签名变化 ⇒ 写 #1
+  // 写 #1：一次成功喂食改变整数签名（道具/成长/好感/冷却基准）⇒ 立即落盘
+  const fed = await rec.send('pet.interact', { kind: 'feed' })
+  assert.equal(fed.ok, true)
   await flush(2)
   assert.equal(mainWrites(), 1, '值变化 ⇒ 写')
 
+  // 共享冷却期内再点洗澡：状态被拒（整数签名不变）且距上次写盘 30s < 60s ⇒ 跳过
   advance(30_000)
-  tick() // floor 全不变（hunger 0.367/clean 0.361 → 都是 0）且距上次 30s < 60s ⇒ 跳过
+  const rejected = await rec.send('pet.interact', { kind: 'bathe' })
+  assert.equal(rejected.ok, false)
   await flush(2)
   assert.equal(mainWrites(), 1, '签名未变且 <60s ⇒ 不写（节流生效）')
 
-  advance(60_000)
-  tick() // 签名仍未变，但距上次写盘 90s ≥ 60s ⇒ 写 #2（时间臂）
+  // 再过 31 秒（距上次写盘 61s ≥ 60s）：签名仍未变，但时间臂到点 ⇒ 写 #2
+  advance(31_000)
+  const rejected2 = await rec.send('pet.interact', { kind: 'bathe' })
+  assert.equal(rejected2.ok, false)
   await flush(2)
-  assert.equal(mainWrites(), 2, '距上次写盘 ≥60s ⇒ 写')
+  assert.equal(mainWrites(), 2, '距上次写盘 ≥60s ⇒ 写（时间臂）')
 
+  // 距上次写盘 30s、签名未变 ⇒ 再跳过
   advance(30_000)
-  tick() // 距上次 30s、签名未变 ⇒ 再跳过
+  await rec.send('pet.interact', { kind: 'bathe' })
   await flush(2)
   assert.equal(mainWrites(), 2)
   cleanup()
 })
 
-test('写盘 · 交互立即落盘：喂食改变整数签名（道具-1）⇒ 不等 60s 直接写 state.json', async (t) => {
+test('写盘 · 交互立即落盘：喂食改变整数签名（道具-1、成长+1、好感+1）⇒ 不等 60s 直接写 state.json', async (t) => {
   const { rec, cleanup } = activate(t)
   await flush()
   const r = await rec.send('pet.interact', { kind: 'feed' })
@@ -343,6 +339,8 @@ test('写盘 · 交互立即落盘：喂食改变整数签名（道具-1）⇒ �
   const persisted = JSON.parse(rec.fs.get('state.json'))
   assert.equal(persisted.schemaVersion, 1)
   assert.equal(persisted.fish, 2, '道具消耗已落盘（崩溃不退还）')
-  assert.equal(persisted.hunger, 100, '+5 被上限钳住后落盘')
+  assert.equal(persisted.growth, 1, '成长值已落盘')
+  assert.equal(persisted.favor, 1, '好感值已落盘')
+  assert.equal(persisted.lastInteractAt, T0, '共享冷却基准已落盘（重启后仍判冷却）')
   cleanup()
 })

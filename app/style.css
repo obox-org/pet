@@ -6,8 +6,12 @@
  * 所以下面这条 `background:transparent` 是本扩展最要紧的样式之一；
  * 写成冒号后不留空格的紧凑形式，是为了让验收 grep 能逐字命中（含义与 `background: transparent` 相同）。
  *
- * 本扩展不接主题桥（design D-6）：整个 app/ 目录零主题 token 引用，配色是 design
- * `## UI 视觉规范` 色值表里的固定值，写在各组件的 scoped 样式里。
+ * **配色只用宿主 token**（design `## UI 视觉规范` 的 token 表 + 七条硬约束第 1 条
+ * "零自造色值"）：本文件只消费 `--fg` 与 `--font-size`，其余颜色写在组件的 scoped 样式里，
+ * 同样全部是 `var(--…)`。**白色只出现在两处**：图标描边与焦点环（v1 的 Q17/R53 用户明确裁定）。
+ *
+ * 本扩展**不接主题桥**（design D-6）：没有主题桥注入、没有自造 token，
+ * 只用宿主 `:root` 上已经存在的 25 个 token——所以浅色/深色主题切换时这里自动跟随。
  */
 html,
 body,
@@ -26,11 +30,11 @@ body {
 }
 
 body {
-  /* 系统字体栈，与宿主一致（design 色值表的"字体"行） */
+  /* 系统字体栈，与宿主一致 */
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif;
-  font-size: 12px;
+  font-size: var(--font-size);
   line-height: 1.4;
-  color: #e2e8f0;
+  color: var(--fg);
   /* 桌面上的 artwork：选中文本没有意义，选区底色还会画出像素 */
   user-select: none;
   -webkit-user-select: none;

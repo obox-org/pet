@@ -27,7 +27,6 @@ import {
   RANDOM_PERF_EVERY_SEC,
   RANDOM_PERF_SET,
   RANDOM_PERF_TIMER_ID,
-  SLEEP_AFTER_MS,
   TEXT,
   TICK_ID,
   TRANSIENT_MS
@@ -52,21 +51,16 @@ const T0 = 1_700_000_000_000
 /** 真实图集声明（assets 归卡 06，本测试只读） */
 const petJson = JSON.parse(readFileSync(new URL('../assets/whale/pet.json', import.meta.url), 'utf8'))
 
-/** 合法 v1 存档文本（字段可覆盖；hunger 调低等场景用得到） */
+/** 合法存档文本（v2 字段集，可按用例覆盖） */
 function saveText(overrides = {}) {
   return JSON.stringify({
     schemaVersion: 1,
-    hunger: 100,
-    clean: 100,
-    mood: 100,
     fish: 3,
     bubble: 3,
     growth: 0,
-    hungerDropAcc: 0,
-    cleanDropAcc: 0,
-    recoverAcc: 0,
-    afkAcc: 0,
-    lastSettledAt: T0,
+    favor: 0,
+    lastGrowthAt: T0,
+    lastAfkAt: T0,
     lastPetAt: 0,
     position: null,
     ...overrides
@@ -143,15 +137,24 @@ test('卡18 随机表演 · 随机集恰 7 项、逐项是合法状态轨，且 
   }
 })
 
-test('卡18/22 · 周期关系（R40 退役后的平凡断言）：60s ≪ 10 分钟入睡阈值，入睡前仍容得下 10 轮', () => {
-  const SLEEP_AFTER_SEC = SLEEP_AFTER_MS / 1000
-  assert.equal(SLEEP_AFTER_SEC, 600, '入睡阈值 = 10 分钟（design D-7）')
-  assert.ok(
-    RANDOM_PERF_EVERY_SEC < SLEEP_AFTER_SEC,
-    `随机周期（${RANDOM_PERF_EVERY_SEC}s）MUST 小于入睡阈值（${SLEEP_AFTER_SEC}s）`
+test('卡18/22 · 周期不依赖任何"入睡阈值"：v2 没有打盹，长时间无交互照常每周期表演', async (t) => {
+  // v1 这里断言"随机周期（60s）≪ 入睡阈值（600s）"。打盹机制（`sleep` 状态与
+  // `SLEEP_AFTER_MS`）已随 design D-10 整体删除 ⇒ 那条关系失去了对象；
+  // v2 的要求相反且更简单：**无论多久没交互，随机表演都按自己的节拍照常播**
+  // （specs/pet-sprites R2「长时间无交互仍活跃」）。
+  const { rec, cleanup, advance, perf } = activate(t)
+  await flush()
+  advance(2 * 3_600_000) // 两小时完全无交互
+  t.mock.method(Math, 'random', () => pickIndex(0))
+  perf()
+  await flush(2)
+  assert.equal(
+    (await rec.send('pet.state')).state.anim.status,
+    RANDOM_PERF_SET[0],
+    '两小时无交互后，周期到点照常抽一条播（没有"打盹时跳过"的门控）'
   )
-  // 卡 22：周期 10s → 60s 后这条关系仍成立（600 / 60 = 10 轮；原先按 10s 写的是"至少 60 轮"）
-  assert.ok(RANDOM_PERF_EVERY_SEC * 10 <= SLEEP_AFTER_SEC, '入睡前至少容得下 10 轮表演')
+  assert.equal((await rec.send('pet.state')).state.anim.self, true, '仍是自发表演')
+  cleanup()
 })
 
 // ————— 纯函数层：映射、优先级、transient 集合 —————
@@ -171,13 +174,17 @@ test('卡18 · 映射契约：run-left→running-left(2)、run-right→running-r
   assert.deepEqual(frameDurations(petJson, 'run-left'), [225, 225, 225, 225, 225, 225, 225, 225])
 })
 
-test('卡18 · 优先级：状态指示轨 > 表演轨（与 trot 同档）> idle；三张表逐项同值', () => {
-  assert.ok(STATUS_PRIORITY.sleep > STATUS_PRIORITY.trot, 'sleep > 表演（睡着不跑）')
+test('卡18 · 优先级：瞬时互动 > 表演轨（同档）> idle；表里没有属性轨/打盹档位', () => {
   for (const status of ['trot', 'run-left', 'run-right']) {
     assert.equal(STATUS_PRIORITY[status], 2, `${status} 与 trot 同档（数值 2）`)
-    assert.ok(STATUS_PRIORITY.sad > STATUS_PRIORITY[status], `状态指示轨高于 ${status}`)
     assert.ok(STATUS_PRIORITY[status] > STATUS_PRIORITY.idle, `${status} > idle`)
+    assert.ok(STATUS_PRIORITY.eating > STATUS_PRIORITY[status], `瞬时互动高于 ${status}`)
   }
+  // v1 的 hungry/dirty/sad 三档与 sleep 档位随三属性与打盹一并删除（design D-10）
+  for (const gone of ['hungry', 'dirty', 'sad', 'sleep']) {
+    assert.equal(Object.hasOwn(STATUS_PRIORITY, gone), false, `优先级表不应再有 ${gone}`)
+  }
+  assert.equal(Object.keys(STATUS_PRIORITY).length, 8, '优先级表恰好八项（idle + 七条瞬时轨）')
   assert.equal(STATUS_LABEL['run-left'], '向左小跑')
   assert.equal(STATUS_LABEL['run-right'], '向右小跑')
 })
@@ -219,11 +226,10 @@ test('卡19 · transient 集合：七项表演轨都被认作 transient（否则
     false,
     'transient 到期 ⇒ false（即便标记还在）'
   )
-  // resolveStatus：表演写在 transient 里 ⇒ 短暂覆盖状态指示轨；到期后回落到真实判定
-  const hungry = { ...initialState(T0), hunger: 10 }
-  const performing = { ...hungry, transient: { status: 'run-left', until: T0 + 1800 }, transientSelf: true }
-  assert.equal(resolveStatus(performing, T0), 'run-left', '表演高于 hungry（Q16）')
-  assert.equal(resolveStatus(performing, T0 + 1800), 'hungry', '一轮播完 ⇒ 回落真实判定')
+  // resolveStatus：表演写在 transient 里 ⇒ 短暂覆盖基础态；到期后回落到真实判定（idle）
+  const performing = { ...initialState(T0), transient: { status: 'run-left', until: T0 + 1800 }, transientSelf: true }
+  assert.equal(resolveStatus(performing, T0), 'run-left', '表演覆盖待机（Q16）')
+  assert.equal(resolveStatus(performing, T0 + 1800), 'idle', '一轮播完 ⇒ 回落真实判定（v2 只剩 idle）')
   // 拖动中不报入口自发的表演（buildView 的 dragging 折叠，D-13）：status 与 self 一起折
   assert.equal(buildView(performing, T0, { dragging: true }).anim.status, 'idle', '被拎起来时不自己跑')
   assert.equal(buildView(performing, T0, { dragging: true }).anim.self, false, '折 idle 时来源标记也如实报 false')
@@ -246,9 +252,8 @@ test('卡18 随机表演 · 到点抽一条播一轮（row/label/status 齐全�
   // 卡 19：自发表演的视图必须带 self=true（页面靠它决定"播完折回呼吸 idle"）
   assert.deepEqual(during.anim, { ...animOf(RANDOM_PERF_SET[0]), self: true }, '抽中那一条的 row/label/status + self')
   assert.equal(during.bubble, null, '随机表演 MUST NOT 弹气泡')
-  assert.deepEqual(during.vitals, before.vitals, '三属性一个字节不变')
+  assert.deepEqual(during.values, before.values, '成长值/好感/等级一个字节不变')
   assert.deepEqual(during.items, before.items, '不消耗道具')
-  assert.deepEqual(during.growth, before.growth, '成长值不变')
 
   advance(TRANSIENT_MS[RANDOM_PERF_SET[0]] - 1)
   const justBefore = (await rec.send('pet.state')).state
@@ -279,43 +284,45 @@ test('卡18 随机表演 · 每个周期都能抽到不同的项：7 项逐个�
   cleanup()
 })
 
-test('卡18 随机表演 · 打盹期间周期到期也不播；被交互唤醒后下一个周期照常表演', async (t) => {
-  const { rec, cleanup, advance, tick, perf } = activate(t)
+test('卡18 随机表演 · 无打盹门控：两小时无交互后周期到点照常播（v1 的"打盹时跳过"已删除）', async (t) => {
+  // ⚠️ v1 这条用例断言"连续 10 分钟无交互 ⇒ 打盹 ⇒ 随机表演跳过"。打盹机制
+  // （`sleep` 状态 / `SLEEP_AFTER_MS` / 1.5× 慢放）已随 design D-10 整体删除，
+  // 那条断言失去了对象；v2 的要求是**反面**：长时间无交互时随机表演照常按节拍播。
+  const { rec, cleanup, advance, perf } = activate(t)
   await flush()
-  advance(SLEEP_AFTER_MS)
-  tick()
-  await flush(2)
-  assert.equal((await rec.send('pet.state')).state.anim.status, 'sleep', '连续 10 分钟无交互 ⇒ 打盹')
+  advance(2 * 3_600_000)
+  assert.equal((await rec.send('pet.state')).state.anim.status, 'idle', '两小时无交互也只是待机（没有打盹态）')
 
   t.mock.method(Math, 'random', () => pickIndex(0))
   perf()
   await flush(2)
-  assert.equal((await rec.send('pet.state')).state.anim.status, 'sleep', '打盹期间 MUST NOT 表演')
-
-  // 反向自检：不是"定时器坏了"——任何交互唤醒后，下一个周期照常抽签
-  await rec.send('pet.interact', { kind: 'play' })
-  advance(TRANSIENT_MS.playing + 1)
-  perf()
-  await flush(2)
-  assert.equal((await rec.send('pet.state')).state.anim.status, RANDOM_PERF_SET[0], '醒来后照常表演')
+  assert.equal(
+    (await rec.send('pet.state')).state.anim.status,
+    RANDOM_PERF_SET[0],
+    '没有"打盹时跳过"的分支 ⇒ 照常抽签播放'
+  )
   cleanup()
 })
 
-test('卡18 随机表演 · 属性过低（hungry）不是门控：表演短暂覆盖状态指示轨且数值不动', async (t) => {
-  const { rec, cleanup, perf } = activate(t, { files: { 'state.json': saveText({ hunger: 10 }) } })
+test('卡18 随机表演 · 表演只改姿态：成长值/好感/道具/冷却基准都不动（零副作用）', async (t) => {
+  const { rec, cleanup, perf } = activate(t)
   await flush()
-  assert.equal((await rec.send('pet.state')).state.anim.status, 'hungry', '基线：饿了')
+  const before = (await rec.send('pet.state')).state
   t.mock.method(Math, 'random', () => pickIndex(RANDOM_PERF_SET.indexOf('playing')))
   perf()
   await flush(2)
   const during = (await rec.send('pet.state')).state
-  assert.equal(during.anim.status, 'playing', '表演高于状态指示轨（Q16）')
-  assert.equal(during.vitals.hunger, 10, '表演只改姿态，不改数值')
+  assert.equal(during.anim.status, 'playing', '表演短暂覆盖待机（Q16）')
+  assert.deepEqual(during.values, before.values, '成长值/好感不变')
+  assert.deepEqual(during.items, before.items, '道具不消耗')
+  // 冷却基准不动 ⇒ 表演之后立刻喂食仍然成功（若表演推进了 lastInteractAt，这里会变成 cooling）
+  const fed = await rec.send('pet.interact', { kind: 'feed' })
+  assert.equal(fed.ok, true, '表演不推进共享冷却基准')
   cleanup()
 })
 
 test('卡18 随机表演 · 真实互动随时抢占：表演中 pet.interact{feed} ⇒ 立即切 eating，数值照常生效', async (t) => {
-  const { rec, cleanup, perf } = activate(t, { files: { 'state.json': saveText({ hunger: 50 }) } })
+  const { rec, cleanup, perf } = activate(t)
   await flush()
   t.mock.method(Math, 'random', () => pickIndex(RANDOM_PERF_SET.indexOf('run-right')))
   perf()
@@ -326,7 +333,8 @@ test('卡18 随机表演 · 真实互动随时抢占：表演中 pet.interact{fe
   assert.equal(r.ok, true)
   assert.equal(r.state.anim.status, 'eating', '互动立刻顶掉表演（共用 transient 字段）')
   assert.equal(r.state.items.fish, 2, '道具照常扣')
-  assert.equal(r.state.vitals.hunger, 55, '饥饿照常 +5')
+  assert.equal(r.state.values.growth, 1, '成长值照常 +1')
+  assert.equal(r.state.values.favor, 1, '好感照常 +1')
   assert.ok(r.feedback && typeof r.feedback.text === 'string', '互动反馈照常给（表演自己不弹气泡）')
   cleanup()
 })
@@ -334,11 +342,11 @@ test('卡18 随机表演 · 真实互动随时抢占：表演中 pet.interact{fe
 test('卡18 随机表演 · 不打断正在播的瞬时动画（周期恰好落在互动那一轮里 ⇒ 让位）', async (t) => {
   const { rec, cleanup, perf } = activate(t)
   await flush()
-  await rec.send('pet.interact', { kind: 'play' }) // playing 轨一轮 1500ms
+  await rec.send('pet.interact', { kind: 'bathe' }) // bathing 轨一轮 1400ms
   t.mock.method(Math, 'random', () => pickIndex(0)) // 想抽 eating
   perf()
   await flush(2)
-  assert.equal((await rec.send('pet.state')).state.anim.status, 'playing', '用户刚点出来的那一轮不被打断')
+  assert.equal((await rec.send('pet.state')).state.anim.status, 'bathing', '用户刚点出来的那一轮不被打断')
   cleanup()
 })
 
@@ -359,26 +367,26 @@ test('卡18 随机表演 · 门控：拖动中不播（松手恢复）；窗体�
 
   api.settings.set('pet.visible', false)
   await flush()
-  perf()
-  await flush(2)
-  assert.equal((await rec.send('pet.state')).state.anim.status, 'idle', '窗体不在 ⇒ 没有观看者，不表演')
+  // v2：关窗即清时钟（design D-3 的"清理"列）⇒ pet-perf 根本不在，比"在但门控跳过"更彻底
+  assert.equal(rec.timers.has(RANDOM_PERF_TIMER_ID), false, '窗体不在 ⇒ 随机表演定时器已随窗体清掉')
+  assert.equal((await rec.send('pet.state')).state.anim.status, 'idle', '没有观看者 ⇒ 不会有表演')
   cleanup()
 })
 
-test('卡18 随机表演 · 不推进也不重置 lastInteractAt：期间演过一轮，10 分钟照样入睡', async (t) => {
+test('卡18 随机表演 · 不推进也不重置 lastInteractAt / lastAfkAt：表演后喂食照常、挂机计时不受影响', async (t) => {
+  // ⚠️ v1 这条用例靠"演过一轮后 10 分钟照样入睡"来反证"表演不是用户交互"。打盹已删除，
+  // 改为直接钉 v2 的两个受影响字段：共享冷却基准（lastInteractAt）与挂机奖励基准（lastAfkAt）。
   const { rec, cleanup, advance, perf } = activate(t)
   await flush()
-  advance(SLEEP_AFTER_MS - 100_000) // 8 分 20 秒无交互
+  advance(1_199_000) // 差 1 秒满挂机周期
   t.mock.method(Math, 'random', () => pickIndex(0))
   perf()
   await flush(2)
   assert.equal((await rec.send('pet.state')).state.anim.status, RANDOM_PERF_SET[0], '这一次表演正常触发')
-  advance(100_001) // 距启动累计 600_001ms ≥ 10 分钟
-  assert.equal(
-    (await rec.send('pet.state')).state.anim.status,
-    'sleep',
-    '表演没有刷新 lastInteractAt（它不是用户交互）：若被刷新，这里会是 idle'
-  )
+  advance(2_000) // 若有任何 tick 结算，这点时间刚好够发一次挂机奖励
+  // 表演既没把 lastInteractAt 推到"刚刚"（否则下面喂食会 cooling），也没重置挂机计时
+  const fed = await rec.send('pet.interact', { kind: 'feed' })
+  assert.equal(fed.ok, true, '表演不推进共享冷却基准（它不是用户交互）')
   cleanup()
 })
 
@@ -448,15 +456,15 @@ test('卡19 · anim.self：七项随机抽到**逐项**为 true（参数化）�
   cleanup()
 })
 
-test('卡19 · anim.self：四种真实互动**逐项**为 false（与随机抽到同名同轨时的唯一区分手段）', async (t) => {
-  const { rec, cleanup } = activate(t)
+test('卡19 · anim.self：三种真实互动**逐项**为 false（与随机抽到同名同轨时的唯一区分手段）', async (t) => {
+  const { rec, cleanup, advance } = activate(t)
   await flush()
   for (const [kind, status] of [
     ['feed', 'eating'],
     ['bathe', 'bathing'],
-    ['play', 'playing'],
     ['pet', 'petted']
   ]) {
+    advance(3_600_000) // 让共享冷却（喂食/洗澡）与点击冷却（1 小时）各自到期
     const r = await rec.send('pet.interact', { kind })
     assert.equal(r.ok, true, `${kind} 成功`)
     assert.equal(r.state.anim.status, status, `${kind} ⇒ ${status} 轨`)
@@ -479,13 +487,13 @@ test('卡19 · 随机表演期间触发互动 ⇒ 动画与气泡**同时**为�
   assert.equal(during.anim.self, true, '表演期间 self=true')
   assert.equal(during.bubble, null, '随机表演自己不弹气泡')
 
-  const r = await rec.send('pet.interact', { kind: 'play' })
+  const r = await rec.send('pet.interact', { kind: 'bathe' })
   assert.equal(r.ok, true)
   // 动画：立刻切到互动那一轨，且来源标记翻回 false（页面据此不折这一轮）
-  assert.equal(r.state.anim.status, 'playing', '互动动画立刻顶掉表演')
+  assert.equal(r.state.anim.status, 'bathing', '互动动画立刻顶掉表演')
   assert.equal(r.state.anim.self, false, '互动轮次 ⇒ self=false（与表演彻底区分开）')
   // 气泡：同一份回包里就有互动反馈 ⇒ 动画与气泡同时生效
-  assert.equal(r.state.bubble.text, TEXT.playOk, '气泡与动画同为互动（"玩得好开心！"）')
+  assert.equal(r.state.bubble.text, TEXT.batheOk, '气泡与动画同为互动')
   assert.equal(r.state.bubble.tone, 'good')
   cleanup()
 })
@@ -507,17 +515,10 @@ test('卡19 · transientSelf 是运行时字段：**不落盘**（serialize 白�
   // 读档：白名单构造 ⇒ 运行时字段一律清空/归一 false（存档里就算被人手写进去也不生效）
   const forged = JSON.stringify({
     schemaVersion: 1,
-    hunger: 100,
-    clean: 100,
-    mood: 100,
+    growth: 0,
+    favor: 0,
     fish: 3,
     bubble: 3,
-    growth: 0,
-    hungerDropAcc: 0,
-    cleanDropAcc: 0,
-    recoverAcc: 0,
-    afkAcc: 0,
-    lastSettledAt: T0,
     lastPetAt: 0,
     position: null,
     transientSelf: true,

@@ -15,6 +15,7 @@
  */
 import { buildView, createSubscribeHub } from './lib/bridge.js'
 import {
+  BUBBLE_MS,
   CHANNELS,
   DRAG_PHASES,
   FILE_BAD,
@@ -38,15 +39,18 @@ import {
   STATUSBAR_IDLE,
   SUBSCRIBE_HOLD_MS,
   TEXT,
+  TEXT_EVERY_SEC,
   TICK_ID,
   TICK_SECONDS,
   TRANSIENT_MS,
   TRANSIENT_TIMER_ID
 } from './lib/constants.js'
+import { finiteOr, levelOf } from './lib/growth.js'
 import { interact } from './lib/interact.js'
-import { isTransient, resolveStatus, transientDelaySeconds, transientExpired } from './lib/mapping.js'
+import { resolveStatus, transientDelaySeconds, transientExpired } from './lib/mapping.js'
 import { deserialize, sanitizePosition, serialize } from './lib/persist.js'
-import { initialState, settle, startupReset } from './lib/settle.js'
+import { initialState, onWindowDestroyed, settle, startupReset } from './lib/settle.js'
+import { pickFavorText } from './lib/texts.js'
 
 /** 错误对象 → 可日志化文本（宿主抛的可能是任意值） */
 function errMsg(err) {
@@ -55,6 +59,34 @@ function errMsg(err) {
 
 /** 诊断位的"窗体创建失败"前缀（恢复后只清同类诊断，不误清保存失败的文案） */
 const TEXT_CREATE_FAILED_PREFIX = TEXT.createFailedPrefix
+
+/**
+ * 入口本地常量：两只一次性定时器的 id 与 v2 的四个设置键。
+ *
+ * **为什么落在本文件而不是 `lib/constants.js`**：该文件（常量唯一来源）所有权在卡 1 / 卡 6，
+ * 本次任务卡明令不得改动；它已经导出了**周期与时长**（`TEXT_EVERY_SEC` / `BUBBLE_MS`）与
+ * 三只既有定时器 id（`TICK_ID` / `RANDOM_PERF_TIMER_ID` / `TRANSIENT_TIMER_ID`），
+ * 但没有 `pet-text` / `pet-bubble` 的 id，也没有 `pet.growth` / `pet.favor` / `pet.favorExact` /
+ * `pet.level` 四个设置键
+ * （v1 只声明了三属性键）。为了让本次实现可运行、又不动别人的文件，这里以**字面量**落在唯一使用点，
+ * 值逐字来自 design D-3 的定时器表与 specs/pet-settings 的字段清单；
+ * 归并进 `constants.js` 时只搬位置、不改值（已在回执的"越界声明"里登记）。
+ *
+ * `pet.hunger` / `pet.clean` / `pet.mood` 三个**旧**键仍从 `constants.js` 引入（只用于迁移清理，
+ * 见 `clearLegacyVitalKeys`）；它们的删除与本次的新键归并是同一件事，必须由常量文件的所有者一起做。
+ */
+const TEXT_TIMER_ID = 'pet-text'
+const BUBBLE_TIMER_ID = 'pet-bubble'
+const KEY_GROWTH = 'pet.growth'
+const KEY_FAVOR = 'pet.favor'
+const KEY_FAVOR_EXACT = 'pet.favorExact' // 精确好感值（status 行；progress 行会被宿主钳到 max）
+const KEY_LEVEL = 'pet.level'
+
+/**
+ * v1 → v2 迁移的诊断文案（specs/pet-values R4 / design R6 的"记录一条迁移诊断"）。
+ * 只写**一次**（迁移后三属性键已不存在，`migratedFromV1` 不会再为真）。
+ */
+const TEXT_MIGRATED_V1 = '已从 v1 迁移：三属性已丢弃'
 
 export default function pet(api) {
   // ————— 路径：用 import.meta.url 推导，不硬编码 app://extensions/pet/ —————
@@ -82,7 +114,7 @@ export default function pet(api) {
   let persistInFlight = false // 写盘不并发叠加（慢盘时跳过本轮，下一 tick 补）
   let forceQueued = false // 在途写盘期间又来一次**强制**落盘 ⇒ 记欠账，写完补一次（见 persistState）
   // ————— 卡 15 新增的运行时状态（同样随 cleanup 一起消亡） —————
-  let dragging = false // 拖动中（design D-13 互斥：抑制随机表演与 sleep 推进、不弹气泡）
+  let dragging = false // 拖动中（design D-13 互斥：抑制随机表演、不弹气泡）
   let positionReplyWarned = false // overlay 成功回包却没带 position（R31 之前的宿主）⇒ 只 warn 一次
   let noSetPositionWarned = false // 宿主根本没有 setPosition ⇒ 只 warn 一次（拖动降级为"不移动"）
   /**
@@ -91,6 +123,14 @@ export default function pet(api) {
    * 「宠物窗体创建失败：…」留给用户排查，成功（含"设置里关掉了宠物、根本没建窗"）才复位。
    */
   let lastCreateFailed = false
+  /**
+   * 读档时是否识别出 v1 的旧存档（`deserialize` 的 `migratedFromV1`）。
+   * 用途**只有一条**（specs/pet-values R4 / design R6）：启动序列末尾写一次迁移诊断，
+   * 并把三个旧设置键置空串（`api.settings` 无删除 API）。
+   * 为什么不在读档当场写：启动成功后的诊断复位（`resetDiagnostic`）会无条件清空诊断位，
+   * 当场写下会被它抹掉；所以先记标志，复位之后再写。
+   */
+  let migratedFromV1 = false
 
   // 长轮询订阅队列（design D-3）：hold 25s < 宿主桥 60s 超时（理由见 lib/constants.js 注释）
   const hub = createSubscribeHub({ holdMs: SUBSCRIBE_HOLD_MS })
@@ -162,34 +202,83 @@ export default function pet(api) {
     setDiagnostic(null, true)
   }
 
-  // ————— 设置同步（任务卡：每次结算/交互后把三属性写进设置键，供 progress 字段渲染） —————
-  function syncVitalSettings() {
+  // ————— 设置同步（specs/pet-settings：五行展示；每次状态落定后把两个数值 + 精确好感值 + 等级名写进设置键） —————
+  /**
+   * 把 `growth` / `favor` / 精确好感值 / 等级名写进四个设置键（沿用 v1 的"vital → settings"同步机制，只换键与口径）。
+   *
+   * 四者的**值类型由 `manifest.json` 的字段类型决定**（`docs/extension-api/themes-settings.md`）：
+   * - `pet.growth` 是 `status`（只读文本）⇒ 必须写**字符串**；
+   * - `pet.favor` 是 `progress`（只读进度条，`max: 650`）⇒ 必须写**数字**，宿主自己取整显示
+   *   `{cur}/{max}`、条宽用未取整比例（好感是整数，这里不存在取整分歧）；
+   * - `pet.favorExact` 是 `status` ⇒ 写**精确好感值**的字符串，不钳；
+   * - `pet.level` 是 `status` ⇒ 写**等级名**（specs/pet-interaction：面板/设置页显示"心有灵犀"这种词）。
+   *
+   * **两条写入口径**（R-S1 修正）：
+   * - 两个键都写**未钳真值**——入口不做任何 max 钳制，钳制是宿主行为，扩展侧钳一次就等于丢掉真值；
+   * - 但**显示**要靠 `pet.favorExact`：宿主的 `progress` 字段把 `cur` 钳到 `[0,max]` 再向下取整
+   *   （`SettingsView.vue:685-687`），好感满级（650）后继续累加时进度行永远是 `650/650`，
+   *   真实好感只在这条 `status` 行可见（specs/pet-settings 的「好感超过进度条上限」scenario、
+   *   design.md:13）。
+   *
+   * 设置 `set` 会同步通知订阅者（api-reference.md:312），而 `onChanged` 只认 `pet.visible` 与空 key
+   * ⇒ 这里写的四个键会被设置监听器过滤掉，不会反过来触发窗体判定。
+   *
+   * **调用点 = 每一个 `rev++` 之后**（任务卡"设置值推送"的硬要求；沿用 v1 的 vital→settings 机制）。
+   * 其中 `pet-perf` / `pet-text` / 两个到期回调**不改变**这四个值，写的是同一批数字——
+   * 多写几笔的代价可以忽略（每次 4 次 `set`、约 2 次/分钟），换来的是"设置页永不落后于视图"
+   * 这条不需要逐路径论证的硬保证（将来任何一条路径改了数值，只要它 rev++ 就自动同步）。
+   */
+  function syncValueSettings() {
     if (!state) return
-    // 写**未取整真值**（浮点，已钳 [0,100]）：宿主显示 {cur} = Math.floor(cur)、
-    // 条宽用未取整比例 cur/100（specs/pet-settings 的显示口径）——取整是渲染层的事，
-    // 入口若先取整，条宽与数字会不一致（validation N3 修复的正是这一点）。
-    api.settings.set(KEY_HUNGER, state.hunger)
-    api.settings.set(KEY_CLEAN, state.clean)
-    api.settings.set(KEY_MOOD, state.mood)
+    // 等级数字（`level`）只进视图（PetStateView.values.level），设置页这一行展示的是等级名
+    const { name } = levelOf(state.favor)
+    api.settings.set(KEY_GROWTH, String(state.growth))
+    api.settings.set(KEY_FAVOR, state.favor)
+    api.settings.set(KEY_FAVOR_EXACT, String(state.favor)) // 不钳：progress 行满格后，真值靠这一行可见
+    api.settings.set(KEY_LEVEL, name)
   }
 
-  // ————— 持久化（specs/pet-vitals 存档 requirement + design R7 写盘节流） —————
   /**
-   * 节流签名：显示口径的整数值 + 整数型字段。签名不变且距上次写盘 <60s ⇒ 跳过
-   * （浮点衰减每 tick 都在动，按原始值判"变化"节流就形同虚设——口径记录在 constants.js）。
-   * 卡 15 起把 `position` 也纳入签名：拖动换位必须能触发写盘
-   * （拖动结束另有**强制落盘**，这里是让"非强制路径"也不漏掉它，R10 的单写者口径）。
-   * 卡 17：卡 15 一并纳入签名的 `hidden` 随隐藏功能移除（Q15=B）。
+   * 迁移收尾（specs/pet-values R4 / design D-7 的最后一行）：
+   * 把 v1 的三个属性设置键置**空串**。`api.settings` 没有删除方法，空串是"不显示/无值"的等价物，
+   * 且 `manifest.json` 已不再声明这三个键 ⇒ 宿主设置页不再渲染它们（残留的值也不会再被读）。
+   *
+   * 只在 `migratedFromV1 === true` 时调用：正常存档里不存在这三个键，没必要每次启动都写三笔。
+   * 三个键名仍取 `lib/constants.js` 的 `KEY_HUNGER/KEY_CLEAN/KEY_MOOD`（常量单一来源；
+   * 它们的删除要连同本文件的引用一起做，见文件头部"入口本地常量"的注释）。
+   */
+  function clearLegacyVitalKeys() {
+    try {
+      api.settings.set(KEY_HUNGER, '')
+      api.settings.set(KEY_CLEAN, '')
+      api.settings.set(KEY_MOOD, '')
+    } catch (err) {
+      console.warn('[pet] 清理 v1 设置键失败：' + errMsg(err))
+    }
+  }
+
+  // ————— 持久化（specs/pet-values R4 存档 requirement + design R7 写盘节流） —————
+  /**
+   * 节流签名：**显示口径的整数值 + 整数型字段 + 位置**。签名不变且距上次写盘 <60s ⇒ 跳过。
+   *
+   * v2 起签名只含真实**持久化字段**（design D-1 的白名单，与 `persist.serialize` 同一批）：
+   * `growth` / `favor` 两个整数、道具、两个冷却基准与文本基准、位置。
+   * v1 的三个属性已随 `pet-vitals` 删除（design D-10），连同"浮点衰减每 tick 都在动、
+   * 只能按整数值判变化"的注释理由一起退役——现在参与签名的都是整数或时间戳，按原值比对即可。
+   * `transient` / `transientSelf` / `speech` **故意不在签名里**：它们是运行时渲染态、不落盘，
+   * 进签名只会让"播一轮动画"触发一次无意义的写盘（卡 19 的口径：到期推送零磁盘 IO）。
    */
   function persistSignature(s) {
     return [
-      Math.floor(s.hunger),
-      Math.floor(s.clean),
-      Math.floor(s.mood),
+      s.growth,
+      s.favor,
       s.fish,
       s.bubble,
-      Math.floor(s.growth),
+      s.lastInteractAt,
       s.lastPetAt,
+      s.lastGrowthAt,
+      s.lastAfkAt,
+      s.lastTextAt,
       s.position ? s.position.x + ',' + s.position.y : ''
     ].join('|')
   }
@@ -265,6 +354,9 @@ export default function pet(api) {
       // "超工作区"**不在此列**：入口拿不到 workArea，判不出越界；越界坐标原样发给宿主 setPosition，
       // 由宿主钳位并回传实际坐标（卡 14），入口用回传值校正 ⇒ 账实一致。
       if (result.positionDropped) console.warn(TEXT.logPositionBad)
+      // v1 存档迁移（specs/pet-values R4）：`deserialize` 只在旧存档**真的带了三属性键**时为真。
+      // 这里只记标志，诊断位与三个旧设置键在启动序列末尾处理（`resetDiagnostic` 会清空诊断位）。
+      migratedFromV1 = result.migratedFromV1 === true
       return result.state
     }
     try {
@@ -418,7 +510,8 @@ export default function pet(api) {
    *   （`resolveStatus` 在 `until` 之后本就不再认它），hub 为空时 `wake()` 是 no-op，`rev++` 无副作用；
    * - **拖动中**：照清照推。`until` 是**墙钟截止时刻**，拖动不会延长它；拖动中 `buildView` 本就把输出
    *   折成 idle（D-13），清不清都不影响拖动中的画面，松手后按当时的条件重新判定，不会被"卡在半轮"；
-   * - **打盹/属性过低**：与它们无关——到期后视图自然是按 `resolveStatus` 判定出来的真实状态。
+   * - **无窗体 / 数值高低**：与它们无关——到期后视图自然是按 `resolveStatus` 判定出来的真实状态
+   *   （v2 只剩 idle 与未到期的 transient 两种，没有任何"数值过低"的负面姿态）。
    */
   function onTransientExpire() {
     if (disposed || !state) return
@@ -429,10 +522,167 @@ export default function pet(api) {
     }
     state = { ...state, transient: null, transientSelf: false }
     rev++
+    syncValueSettings() // 只在 rev++ 之后同步设置键（值没变，写的是同一批数字；见该函数的注释）
     hub.wake()
   }
 
-  // ————— 随机表演（design D-14 改版 / 用户裁定 Q16；specs/pet-sprites 的随机表演 requirement） —————
+  // ————— 气泡（specs/pet-interaction 的"气泡 4 秒"与"互动优先级"；design D-2 / D-6） —————
+  /**
+   * 气泡定时器的**秒数**（`api.timer` 只收 1–86400 的整数秒，api-reference.md:405-414,552-572）：
+   * `max(1, ceil(剩余毫秒 / 1000))`。新气泡的剩余恰是 `BUBBLE_MS = 4000` ⇒ **4 秒**；
+   * 早到重排与重建补排要按**剩余**算，所以统一从 `until - now` 推（同一个公式，三个调用点）。
+   * `Math.max(1, ...)` 是下限保护：常量被改到 0/负数时宿主会拒绝非法秒数，宁可退化成 1 秒。
+   *
+   * 为什么不复用 `transientDelaySeconds`：那个函数带 86400 秒的**上限**与"畸形取 1 秒"的口径，
+   * 是为动画轮长（1.4–1.8s）设计的；气泡是另一条独立的 4 秒语义（D-6），共用会让
+   * "气泡哪天变长"悄悄受动画的钳制。两者只共享"向上取整、宁晚不早到"这条原则。
+   */
+  function bubbleDelaySeconds(until, now) {
+    return Math.max(1, Math.ceil((finiteOr(until, 0) - finiteOr(now, 0)) / 1000))
+  }
+
+  /**
+   * 为"当前这一条气泡"排一次到期清理（`pet-bubble`，一次性 setTimeout）。
+   *
+   * **覆盖语义（先清后设）**：互动反馈会替换当前气泡，所以这里固定先 `clearTimeout` 再 `setTimeout`，
+   * 任何时刻**至多一个**待触发的清理（与 `armTransientExpiry` 同款，宿主对同 id 重复设置本就是重置，
+   * clear 让 mock / 断言也看得到）。
+   *
+   * 没有气泡对象 / until 畸形 ⇒ 不排（不为不存在的气泡空转）。
+   */
+  function armBubbleExpiry(speech, now) {
+    const until = speech && typeof speech === 'object' ? speech.until : undefined
+    if (typeof until !== 'number' || !Number.isFinite(until)) return
+    api.timer.clearTimeout(BUBBLE_TIMER_ID)
+    api.timer.setTimeout(BUBBLE_TIMER_ID, bubbleDelaySeconds(until, now), onBubbleExpire)
+  }
+
+  /**
+   * 当前气泡是否**仍在显示**（= 被占用）。判据只看 `until` 与 now：
+   * 到期后即便回调还没跑（定时器漂移），也不算占用——视图侧 `buildView` 用的是同一口径
+   * （`until > now` 才输出 `bubble`），两处必须一致，否则会出现"视图没有气泡但入口认为被占用"，
+   * 定时文本被永久丢弃。
+   */
+  function bubbleActive(now) {
+    const speech = state && state.speech
+    return !!speech && typeof speech === 'object' && typeof speech.until === 'number' && speech.until > now
+  }
+
+  /**
+   * 显示一条气泡（`state.speech`，运行时字段、不落盘）并把 `pet-bubble` 重排为 4000ms。
+   *
+   * **优先级只看"谁调用它"**（design D-6）：互动反馈直接调它 ⇒ **无条件替换**当前气泡并重排定时器
+   * （互动反馈优先级最高，specs/pet-interaction 的"互动打断定时文本"scenario）；
+   * 定时文本在调用前自己判 `bubbleActive`，占用时**不调用**（丢弃，不排队）。
+   * 把判断留在调用方，是为了不让本函数偷偷丢弃"关键的失败反馈"（没有小鱼干这类）。
+   *
+   * @returns {boolean} 是否真的写了气泡（text 非空字符串才写）
+   */
+  function showBubble(text, tone, now) {
+    if (!state || typeof text !== 'string' || text === '') return false
+    state = { ...state, speech: { text, tone: tone === 'bad' ? 'bad' : 'good', until: now + BUBBLE_MS } }
+    armBubbleExpiry(state.speech, now)
+    return true
+  }
+
+  /**
+   * `pet-bubble` 到期：清 `state.speech` → `rev++` → 唤醒推送。**不写盘、不动任何数值**
+   * （气泡是渲染态，写盘签名里没有它）。
+   *
+   * 幂等：清完 `speech` 为 null，再次触发直接返回（不连推 rev）。
+   * 早到（时钟回拨 / 定时器漂移）：`until` 还没到 ⇒ 不清、不推，按剩余秒数**重排**一次
+   * （不重排的话这轮气泡会永远留在视图里，因为没有任何其它路径会来清它）。
+   */
+  function onBubbleExpire() {
+    if (disposed || !state) return
+    const now = Date.now()
+    const speech = state.speech
+    if (!speech || typeof speech !== 'object') return
+    if (finiteOr(speech.until, 0) > now) {
+      armBubbleExpiry(speech, now) // 早到：按剩余时间重排（不清、不推）
+      return
+    }
+    state = { ...state, speech: null }
+    rev++
+    syncValueSettings() // 每次 rev++ 后同步设置键（与其它推送点同一口径）
+    hub.wake()
+  }
+
+  // ————— 定时文本（specs/pet-favor：每 300 秒一条；design D-3 的 pet-text / D-6 的丢弃策略） —————
+  /**
+   * `pet-text` 每 300 秒（`TEXT_EVERY_SEC`）触发一次：按**当前等级**取样一条好感文本并弹 4 秒气泡。
+   *
+   * 取样口径（design D-5 / specs/pet-favor R1）：`levelOf(favor).level` 决定候选池（L1..LN 的并集，
+   * 第 N 级 = N×12 条），`last` 传**上一次显示的气泡文本**做相邻去重。`last` 取 `state.speech.text`
+   * 而不是另存一个游标：气泡文本本来就是"上一次显示的那一句"，多存一个字段只会多一处不一致。
+   *
+   * **丢弃策略（D-6，本卡的负向自检核心）**：气泡正被占用（互动反馈未过期）⇒ 本次**直接丢弃**：
+   * 不排队、不补发、不 `rev++`、不排 `pet-bubble`、不动 `lastTextAt`——specs/pet-favor 的
+   * "互动占用期间丢弃"scenario 就是这一条。绝不"延后 4 秒再冒出来"（那会在互动后突然冒一句陈旧文本）。
+   *
+   * 与动作节拍（`pet-tick` 60 秒 / `pet-perf` 60 秒）**互不取消**（specs/pet-favor 的"与动作节拍互不干扰"）：
+   * 三只定时器各排各的，本函数只碰 `speech`，不碰 `transient`。
+   *
+   * 无窗体（`!overlayAlive`）时**不处理**：这不是 spec 要求的丢弃规则，而是同一件事的两种写法——
+   * 关窗会清掉本定时器（见 `stopClocks`），能走到这里的只有"窗体在"的路径；
+   * 保留这一句是为了防"定时器清掉前已排队的回调"在无窗状态下写一条没人看的气泡。
+   */
+  function onTimedText() {
+    if (disposed || !state) return
+    const now = Date.now()
+    if (!overlayAlive) return
+    if (bubbleActive(now)) return // 被互动反馈占用 ⇒ 丢弃（不排队、不补发、不 rev++）
+    const last = state.speech && typeof state.speech === 'object' ? state.speech.text : undefined
+    // 取样函数是卡 2 的纯模块（`lib/texts.js`）：`level` 决定候选池、`last` 做相邻去重
+    const text = pickFavorText(levelOf(state.favor).level, last)
+    if (!text) return
+    // lastTextAt 是**持久化**的基准（design D-1 字段表）：推进它，重开后才不会"一启动就补一条"
+    state = { ...state, lastTextAt: now }
+    showBubble(text, 'good', now)
+    rev++ // 状态落定后才 +1（D-8）
+    syncValueSettings() // 每次 rev++ 后同步设置键（值没变 ⇒ 写的是同一批数字）
+    hub.wake()
+    void persistState(now)
+  }
+
+  // ————— 五个定时器的注册/清理（design D-3 定时器表；**唯一**的挂摘点） —————
+  /**
+   * 起三个**周期**定时器：
+   * - `pet-tick` 60 秒（`TICK_SECONDS`）：结算成长与挂机奖励；
+   * - `pet-perf` 60 秒（`RANDOM_PERF_EVERY_SEC`）：随机表演一轮；
+   * - `pet-text` 300 秒（`TEXT_EVERY_SEC`）：好感文本一条。
+   *
+   * 三者的注册/清理**只在这里和 `stopClocks`**（单一挂摘点，避免"某条路径漏挂/漏摘"）：
+   * 窗体创建成功 ⇒ `startClocks`；窗体销毁与 cleanup ⇒ `stopClocks`。
+   *
+   * 为什么跟窗体同生命周期，而不是像 v1 那样"进程内常驻"：design D-3 的"清理"列要求销毁窗体时清掉，
+   * 且时间基准由 `onWindowDestroyed` 在销毁路径**一次性推进到当时**（"关窗不计成长/不挂机"的
+   * 唯一实现点）⇒ 关窗期间没有 tick 也不会漏算。反之若常驻，就得靠每 60 秒一次的空转 tick
+   * 去推基准（v1 的做法），关窗期间白跑进程。
+   *
+   * 重复调用是**幂等**的：宿主对同 id 重复 `setInterval` 就是重置，不会叠出两只。
+   */
+  function startClocks() {
+    if (disposed) return
+    api.timer.setInterval(TICK_ID, TICK_SECONDS, onTick)
+    api.timer.setInterval(RANDOM_PERF_TIMER_ID, RANDOM_PERF_EVERY_SEC, onRandomPerf)
+    api.timer.setInterval(TEXT_TIMER_ID, TEXT_EVERY_SEC, onTimedText)
+  }
+
+  /**
+   * 清掉**全部五个**定时器：三只周期（tick / perf / text）+ 两只一次性（bubble / transient）。
+   * 窗体销毁与 cleanup 共用（任务卡：销毁窗体后 `rec.timers.size === 0`）。
+   * 不存在的 id 上 clear 是宿主的无操作（api-reference.md:413），可以无条件全调。
+   */
+  function stopClocks() {
+    api.timer.clearInterval(TICK_ID)
+    api.timer.clearInterval(RANDOM_PERF_TIMER_ID)
+    api.timer.clearInterval(TEXT_TIMER_ID)
+    api.timer.clearTimeout(BUBBLE_TIMER_ID)
+    api.timer.clearTimeout(TRANSIENT_TIMER_ID)
+  }
+
+  // ————— 随机表演（design D-14 / 用户裁定 Q16；specs/pet-sprites 的随机表演 requirement） —————
   /**
    * 每 1 分钟（60 秒）随机播一轮"表演型"动作（`RANDOM_PERF_EVERY_SEC` / `RANDOM_PERF_SET` 是单一来源；**卡 22 / v1.0.2 用户裁定：原来的 10 秒太频繁 ⇒ 改为 1 分钟（60 秒）**）。
    *
@@ -442,15 +692,16 @@ export default function pet(api) {
    * `setTimeout` + `trotArmed` 重排"的独立定时器随之整条退役（design D-14"trot 定时器退役"）。
    *
    * 触发时的门控**只有两条**（都是"让位"，不是"放弃以后再也不播"——下一个周期照常再看一眼）：
-   * ① 正在打盹 ⇒ 不打扰（"睡着就该安静"，design D-14 父代理默认口径）；
+   * ① 没有窗体 / 正在拖动 ⇒ 不表演（没人看；拖动中被拎起来的东西不该自己跑，D-13 互斥）；
    * ② 已经有 transient 在播（真实互动，或上一轮表演还没播完）⇒ 让位，绝不打断用户刚点出来的那一轮。
-   * 状态指示轨（hungry/dirty/sad）**不**是门控：随机表演的优先级高于它们（Q16），
-   * 它只暂时改姿态、不改数值，1.4–1.8s 后自然回落到"饿了/脏了/难过"的真实判定。
+   * **v2 起没有「打盹时跳过」这条门控了**：打盹机制已删除（design D-10 / specs/pet-sprites 的
+   * "宠物 MUST NOT 进入睡眠状态"），长时间无交互时随机表演必须照常每 60 秒一轮。
+   * 也没有"属性过低时让位"的门控：三属性与 hungry/dirty/sad 三条指示轨一并删除，
+   * 随机表演不存在需要让位的"负面真实状态"。
    *
    * 一轮只写 `state.transient`（与真实互动同一字段，复用既有 transient 机制与页面侧帧时钟），
    * 时长取 `TRANSIENT_MS`（= 该轨一轮的真实帧时长之和）。**副作用一个都没有**：
-   * 不消耗道具、不改任何属性/库存/成长值、不弹气泡、不推进也不重置 `lastInteractAt`
-   * （它不是用户交互，不能把 `sleep` 推后）。
+   * 不消耗道具、不改任何数值（成长/好感/库存）、不弹气泡、不推进 `lastInteractAt`、不写盘。
    * `run-left`/`run-right` 也只是原地播帧：这条路径里**没有** `api.overlay.setPosition`
    * （宠物不位移，design Non-Goals）。
    *
@@ -458,15 +709,14 @@ export default function pet(api) {
    * 随机集里有 `eating`/`bathing`/`petted`/`playing` 四项与真实互动同名同轨，
    * 页面只拿到状态字符串，分不出"这一轮是随机抽的还是用户刚点的"，于是本地一轮播完后
    * 仍按入口的 `animStatus='eating'` 一直渲染（实机停留 5/10/15s、连成一片 24.98s）。
-   * 来源只能由写入方记录：这里是唯一的"自发"写入点（真实互动在 lib/interact.js 写 false）。
+   * 来源只能由写入方记录：这里是唯一的"自发"写入点（真实互动在入口的 interact 分支写 false）。
    */
   function onRandomPerf() {
     if (disposed || !state) return
     const now = Date.now()
     if (!overlayAlive || dragging) return // 没窗体没人看；拖动中不自己跑（D-13 互斥）
-    const status = resolveStatus(state, now)
-    if (status === 'sleep') return // 打盹期间不表演（specs/pet-sprites 第三条 scenario）
-    if (isTransient(status)) return // 更高的优先级在播（真实互动 / 上一轮表演）⇒ 让位，不打岔
+    // 已有 transient 在播（真实互动 / 上一轮表演）⇒ 让位，不打岔
+    if (resolveStatus(state, now) !== 'idle') return
     // 均匀随机抽一条：`Math.random` 可在测试里 mock 成确定值来钉住抽到哪一项
     const pick = RANDOM_PERF_SET[Math.floor(Math.random() * RANDOM_PERF_SET.length)]
     const ms = TRANSIENT_MS[pick]
@@ -476,6 +726,7 @@ export default function pet(api) {
     // 卡 19（R54）：到期主动推一次（R54 前要等下一次 pet-perf/pet-tick，页面会把这条表演轨挂住）
     armTransientExpiry(now, state.transient)
     rev++ // 状态落定后才 +1（D-8 次序）：页面据此换轨并播完一轮自行回落
+    syncValueSettings() // 每次 rev++ 后同步设置键（表演不改数值，写的是同一批数字）
     hub.wake()
   }
 
@@ -529,13 +780,19 @@ export default function pet(api) {
               overlayAlive = false
               return
             }
-            // 卡 18（Q16）：随机表演不再需要"窗体就位时立刻排一次"——它是与窗体无关的 1 分钟（60 秒）周期
-            // 定时器（onRandomPerf 每轮自己看 overlayAlive）。toggle 关→开之间的空转被这一条挡掉。
-            // 卡 19（R54）：**唯独**"transient 到期推送"要在重建时补排——销毁路径会清掉它
-            // （见下面 else 分支），若用户在某一轮还没到期时关→开（1.x 秒内），不补这一手
-            // 那条边界又会退回"姿态挂到下一次 tick"。已过期时 `transientDelaySeconds` 给 1 秒、
+            // ————— 时钟（design D-3：五只定时器随窗体生命周期挂摘） —————
+            // 建窗成功 ⇒ 起三只周期定时器（tick / perf / text）。它与销毁路径的 `stopClocks`
+            // 成对出现，是本卡"五个定时器"的**唯一挂载点**（不在 init 里另起一次，
+            // 否则关→开会叠出第二份注册；宿主对同 id 是重置，但读代码的人会以为有两处真相）。
+            startClocks()
+            // 唯独"transient 到期推送"要在重建时补排（v1 R54 的边界）：销毁路径会清掉它，
+            // 若用户在某一轮还没到期时关→开（1.x 秒内），不补这一手那条边界又会退回
+            // "姿态挂到下一次 tick"。已过期时 `transientDelaySeconds` 给 1 秒、
             // 回调的到期校验立刻放行 ⇒ 只补一次推送，不会空转。
-            if (state && state.transient && !disposed) armTransientExpiry(Date.now(), state.transient)
+            // 气泡同理：`speech` 是运行时字段，未到期就重建 ⇒ 按剩余秒数补排一次清理。
+            const rebootAt = Date.now()
+            if (state && state.transient && !disposed) armTransientExpiry(rebootAt, state.transient)
+            if (state && bubbleActive(rebootAt) && !disposed) armBubbleExpiry(state.speech, rebootAt)
           } else {
             const reason = (res && res.error) || '未知原因'
             lastCreateFailed = true // D-1 判据：本次创建失败 ⇒ 启动复位不吃掉这条诊断
@@ -548,11 +805,20 @@ export default function pet(api) {
           overlayAlive = false
           throughNow = true
           dragging = false // 窗体销毁时若正在拖动：拖动会话随之作废（end 到达时按"窗体已关闭"拒绝）
-          // 卡 19（R54）：窗体没了就不必再为它推送到期视图（rebuild 时按剩余时间补排一次，
-          // 见 create 成功分支）。注意**只清定时器、不清 state.transient**：它是渲染态，
-          // `resolveStatus` 在 until 之后本就不再认它，重建后页面拿到的是干净视图。
-          api.timer.clearTimeout(TRANSIENT_TIMER_ID)
+          // **五个定时器全清**（design D-3 的"清理"列；任务卡：销毁后 `rec.timers.size === 0`）。
+          // 注意只清定时器、**不清** `state.transient` / `state.speech`：它们是渲染态，
+          // `resolveStatus` / `buildView` 在 until 之后本就不再认它们，重建后页面拿到的是干净视图。
+          stopClocks()
           hub.drain({ ok: false, error: TEXT.windowClosed }) // 丢弃该 overlay 的 pending 订阅（D-3/D-8）
+          // ————— 关窗不计成长、也不发挂机奖励（specs/pet-values R1 的专门 scenario） —————
+          // 两个累积基准都推进到"关窗这一刻"（lib/settle.js 的 onWindowDestroyed），并**立刻强制落盘**：
+          // 否则进程退出后基准还停在关窗前，下次启动会把关窗时长算进补算里（关三小时涨 72 点）。
+          // 这是本卡"关窗期间没有 tick"的**唯一**依据（时钟已随窗体清掉）。
+          const closedAt = Date.now()
+          if (state) {
+            state = onWindowDestroyed(state, closedAt)
+            void persistState(closedAt, true)
+          }
           const res = await api.overlay.destroy(OVERLAY_ID)
           if (res && !res.ok) console.warn('[pet] 窗体销毁失败：' + res.error) // 宿主 destroy 幂等，理论路径
         }
@@ -563,6 +829,17 @@ export default function pet(api) {
   }
 
   // ————— 结算时钟（design D-5：tick 只负责"到点触发一次结算 + 唤醒订阅"） —————
+  /**
+   * `pet-tick` 每 60 秒（`TICK_SECONDS`）一次：结算成长 + 挂机奖励，必要时 `rev++` 推送。
+   *
+   * 🚩 **`{ overlayExists: overlayAlive }` 是本卡最容易踩的坑（任务卡要点第 0 条 / settle.js 的注释）**：
+   * `settle` 的默认值是 **false**，语义是"宁可今天不涨，也不误发"。漏传或传错（比如传常量 true）
+   * ⇒ 成长**永远不涨**、挂机奖励永远不发，且**不会有任何报错**；
+   * 反之恒传 true ⇒ 关窗期间照样涨，违反 specs/pet-values R1 的"关闭显示期间不涨"。
+   * 真实值只能是"浮层窗体此刻是否存活"（`overlayAlive`，由 create/destroy 两处维护）。
+   * 关窗期间这条路径也不会跑（`pet-tick` 已随窗体一起清掉，见 `stopClocks`），
+   * 基准由销毁路径的 `onWindowDestroyed` 一次性推进——两条路互为兜底。
+   */
   function onTick() {
     if (disposed || !state) return
     const now = Date.now()
@@ -572,27 +849,19 @@ export default function pet(api) {
     if (result.changed) {
       // 次序固定（D-8）：状态落定 → rev+1 → 设置同步（设置页当帧刷新，api-reference.md:312）→ 唤醒订阅 → 节流写盘
       rev++
-      syncVitalSettings()
+      syncValueSettings()
       hub.wake()
       void persistState(now)
     }
-    // 卡 18（Q16）：随机表演是**独立周期**（1 分钟 / 60 秒的 pet-perf 定时器），tick 不再负责任何一次排程
-    // （Q10/Q14 的"每次回落 idle 后重排随机 2–5 分钟"随 trot 定时器一并退役）。
   }
 
-  /** 悬停/交互刷新"最近交互时刻"（D-4 sleep 的退出条件含悬停）；只在对外状态真的变了才唤醒订阅 */
-  function noteInteraction(now) {
-    if (!state) return
-    const before = resolveStatus(state, now)
-    state = { ...state, lastInteractAt: now }
-    const after = resolveStatus(state, now)
-    // 悬停指针事件可能很密集：状态没变（大多数情况）就不 rev+1，避免唤醒风暴；
-    // 变了（如 sleep→idle）必须立刻推给页面，否则宠物"睡着了叫不醒"。
-    if (before !== after) {
-      rev++
-      hub.wake()
-    }
-  }
+  /**
+   * **v1 的 `noteInteraction` 已删除**（悬停/拖动刷新 `lastInteractAt` 的那一段，连同它服务的打盹计时已删除）。
+   * 原因：`lastInteractAt` **只剩一个语义**——喂食/洗澡的共享冷却基准（lib/interact.js）。
+   * 因此悬停（`pet.hit`）与拖动**绝不能**再碰它：否则"把鼠标挪到宠物上"就会重置 10 分钟冷却，
+   * 与 specs/pet-interaction R3「冷却必须持久化、按上次成功互动的时间计算」直接冲突。
+   * 拖动的收尾只保留 design D-3 第二条硬细节：把 `lastAfkAt` 推到当时（见 `pet.drag` 的 end 分支）。
+   */
 
   /** 统一的视图构建：把"拖动中"这个只存在于入口的互斥状态一起交给 buildView（D-13） */
   function currentView(now) {
@@ -635,27 +904,52 @@ export default function pet(api) {
         }
         const kind = payload && typeof payload === 'object' ? payload.kind : undefined
         const now = Date.now()
-        // 纯函数：未知 kind（含已移除的 summon/hide）/ 道具不足 ⇒ ok:false 且状态不动
+        // 卡 3 的纯函数，五种返回（形状见 lib/interact.js 文件头，**不得**在这里改写）：
+        //   成功      { ok:true,  anim:'eating'|'bathing'|'petted', text, state }
+        //   共享冷却  { ok:false, reason:'cooling',     text, state }
+        //   道具不足  { ok:false, reason:'no-item',     text, state }
+        //   点击冷却  { ok:false, reason:'pet-cooling', anim:'petted', text, state }
+        //   未知 kind { ok:false, reason:'unknown-kind', state }        ← 没有 text
         const result = interact(state, kind, now)
-        if (!result.ok) return { ok: false, error: result.error }
-        // 卡 18（Q16）：真实互动与随机表演**共用 `transient` 字段** ⇒ 这里直接覆盖即可
-        // "立即抢占正在播的随机表演"（specs/pet-sprites 的"真实互动可打断随机表演"scenario）；
-        // 数值效果由 lib/interact.js 的纯函数照常算出（道具/属性/联动记账），与表演无关。
-        // 卡 19（热修 D-1）：lib/interact.js 的 succeed() 同时把 `transientSelf` 写回 false
-        // ⇒ 入口与页面都知道"这一轮是用户点的"（页面因此不把它折成 idle，动画与气泡同为互动）。
+
+        // ① 未知 kind（含已移除的 play/summon/hide）：D-9「不弹气泡；诊断位记录」，状态一个字节都不动
+        if (!result.ok && result.reason === 'unknown-kind') {
+          const note = TEXT.unknownKind(String(kind))
+          setDiagnostic(note)
+          return { ok: false, reason: result.reason, error: note }
+        }
+
+        // ② 其余四种都带 state；`anim` 存在 ⇒ 写 transient（成功 = 该互动的轨；点击冷却 = petted）。
+        //    `transientSelf: false` 是必须的（卡 19 / D-2）：这是**用户点出来的**那一轮，
+        //    页面不能把它当自发表演折回 idle（否则"点了没反应"）。
+        //    排一次性到期推送 ⇒ 播完由入口主动回落，不等下一次 tick（specs/pet-sprites 的"播完回落"）。
         state = result.state
-        // 卡 19（R54）：为这一轮真实互动排"到期主动推送"——否则页面会按最近一次视图里的
-        // `anim.status`（优先级 9）把进食/洗澡姿态一直渲染到下一次 15 秒 tick。
-        // 覆盖语义由 armTransientExpiry 保证（同一个 id：先清上一轮的，再排这一轮的）。
-        armTransientExpiry(now, state.transient)
-        // 先算完再唤醒（D-8）：rev 只在状态落定后 +1，避免把中间态发给页面
+        const animMs = typeof result.anim === 'string' ? TRANSIENT_MS[result.anim] : 0
+        if (animMs > 0) {
+          state = { ...state, transient: { status: result.anim, until: now + animMs }, transientSelf: false }
+          armTransientExpiry(now, state.transient)
+        }
+
+        // ③ 气泡（D-6：互动反馈优先级最高，**无条件替换**当前气泡并把 pet-bubble 重排为 4000ms）。
+        //    冷却/道具不足/点击冷却都带 text ⇒ 同样弹（specs/pet-interaction R5：不结算 ≠ 没有反馈）；
+        //    未知 kind 早在上面返回了，不会走到这里。
+        const tone = result.ok ? 'good' : 'bad'
+        showBubble(result.text, tone, now)
+
+        // 先算完再唤醒（D-8）：rev 只在状态落定后 +1。冷却类拒绝虽不改数值，但**视图变了**
+        //（动画 + 气泡），所以同样要 rev++ 推送。
         rev++
-        syncVitalSettings() // 交互后三属性立即进设置键（设置页 progress 当帧刷新）
+        syncValueSettings() // 成功互动会改 growth/favor ⇒ 设置页两行当帧刷新
         hub.wake()
-        // 交互必然改变整数签名（道具/冷却/属性）⇒ 节流放行即可；没有任何 kind 需要强制落盘
-        // （卡 15 的 summon/hide 曾走强制落盘，卡 17 随隐藏功能一并移除）
+        // 成功互动必然改变整数签名（道具/好感/成长/两个冷却基准）⇒ 节流放行即可；
+        // 冷却类拒绝不改任何持久化字段，签名不变 ⇒ 被节流跳过，不产生多余写盘。
         void persistState(now)
-        return { ok: true, state: currentView(now), feedback: result.feedback }
+        return {
+          ok: result.ok,
+          reason: result.reason,
+          state: currentView(now),
+          feedback: { text: result.text, tone }
+        }
       }
 
       case CHANNELS.hit: {
@@ -670,8 +964,8 @@ export default function pet(api) {
             void api.overlay.setMouseThrough(OVERLAY_ID, want)
           }
         }
-        // 悬停算交互（D-4 sleep 触发/退出条件都含悬停）：只在命中时刷新，移出不是"互动"
-        if (inside) noteInteraction(Date.now())
+        // v1 这里还有一次 `noteInteraction`（悬停算交互）：该函数与打盹机制一并已删除，
+        // 悬停**不再**刷新 `lastInteractAt`（否则会把喂食/洗澡的 10 分钟冷却重置）。
         return { ok: true } // D-3：pet.hit 一律 { ok:true }
       }
 
@@ -714,10 +1008,10 @@ export default function pet(api) {
               dragging = true
               // D-13 互斥①：拖动期间不触发随机表演。卡 18 起不需要"清定时器"——1 分钟（60 秒）周期定时器
               // 一直在跑，靠 onRandomPerf 入口处的 `dragging` 判定跳过（拖动结束自动恢复，无需重排）。
-              // D-13 互斥②：拖动是用户交互 ⇒ 刷新 lastInteractAt，sleep 判定不推进；
-              // 加上 buildView 的 dragging 折叠（sleep/入口自发表演 → idle、气泡置 null），
-              // 拖多久都不会"边拖边睡/边拖边跑/冒气泡"（specs/pet-window 的"拖动中不踱步不入睡"）
-              noteInteraction(Date.now())
+              // D-13 互斥②（v2 修订）：加上 buildView 的 dragging 折叠（入口自发表演 → idle、气泡置 null），
+              // 拖多久都不会"边拖边跑/冒气泡"（specs/pet-window 的"拖动中不踱步"）。
+              // **不再**刷新 `lastInteractAt`：那个字段在 v2 只剩"喂食/洗澡共享冷却基准"一个语义，
+              // 拖动若推它会白送一次冷却（v1 的 noteInteraction 已删除）。
               return { ok: true }
             }
 
@@ -742,12 +1036,15 @@ export default function pet(api) {
             // phase === 'end'
             dragging = false
             const now = Date.now()
-            noteInteraction(now) // 松手也是一次交互；此后 sleep/随机表演按当前条件重新判定（D-13）
+            // design D-3 第二条硬细节：「任何成功互动与**拖动结束**后 MUST 把 `lastAfkAt` 推到当前时刻，
+            // 下一次挂机奖励在之后 1200 秒」——松手算一次用户在场，挂机计时从这一刻重新开始。
+            // `lastAfkAt` 是持久化字段，所以下面那次强制落盘会把它一起写下去。
+            state = { ...state, lastAfkAt: now }
             void persistState(now, true) // D-13：拖动结束**强制落盘** position（绕过写盘节流）
             return { ok: true, position: state.position ?? null }
           } catch (err) {
             // 拖动是用户手上的实时操作：任何异常都不能让 rejection 逃进宿主渲染进程，
-            // 也不能把 dragging 卡在 true（那会永久抑制随机表演与 sleep）
+            // 也不能把 dragging 卡在 true（那会永久抑制随机表演）
             console.warn('[pet] 拖动处理异常：' + errMsg(err))
             dragging = false
             return { ok: false, error: TEXT.dragNoBase }
@@ -764,9 +1061,9 @@ export default function pet(api) {
   const offSettings = api.settings.onChanged((key) => {
     if (disposed || !state) return // init 期间由 init 流程自己读最新值，避免半初始化状态驱动窗体
     // 只响应 visible 与"未指明 key"的广播（host.ts:443 语言切换等场景传空串 ⇒ 重读一遍，幂等无害）；
-    // 自己写的三属性/诊断键会回声到这里，必须滤掉，否则每 tick 都触发窗体判定。
+    // 自己写的数值/等级/诊断键会回声到这里，必须滤掉，否则每 tick 都触发窗体判定。
     if (key !== '' && key !== KEY_VISIBLE) return
-    const visible = api.settings.get(KEY_VISIBLE, true) !== false // 默认 true（跨卡契约：卡 09 manifest 同默认值）
+    const visible = api.settings.get(KEY_VISIBLE, true) !== false // 默认 true（跨卡契约：manifest 同默认值）
     void requestOverlay(visible)
     // 卡 17（Q15=B）：这里原来还有一段"关→开的跳变 ⇒ 清除隐藏态"（Q11 优先级）。
     // 隐藏态这个中间态已整条撤销 ⇒ 跳变逻辑连同它的本地镜像 `visibleNow` 一并删除：
@@ -776,7 +1073,7 @@ export default function pet(api) {
   // 状态栏初始文本（D-12：脚手架贡献点里唯一保留的 pet.status，诊断用）
   api.statusBar.setText(STATUSBAR_ID, STATUSBAR_IDLE)
 
-  // ————— 启动序列（D-5"启动"：读档 ⇒ 重置 lastSettledAt ⇒ 按设置建窗 ⇒ 起 tick） —————
+  // ————— 启动序列（D-5"启动"：读档 ⇒ 归一 ⇒ 按设置建窗（建窗即起时钟）⇒ 迁移收尾） —————
   const initPromise = (async () => {
     // 全量兜底：init 任何一步意外抛错（宿主拆除竞态、settings 存储异常……）都不能让
     // 扩展变成"消息面永远 notReady、时钟永远不起"的半残状态（D-9"不抛出、不影响宿主"）
@@ -784,11 +1081,12 @@ export default function pet(api) {
       const now = Date.now()
       state = await loadPersisted(now)
       if (disposed) return
-      // 不追算离线（grill Q4 / specs/pet-vitals"关闭三天不追算"）：lastSettledAt 重置为当前时刻
+      // startupReset **不**重置累积基准：v2 的 R1 要求"重开时按存档里的 lastGrowthAt 补算"（≤24h），
+      // 它只清运行时字段 + 把非法/未来的基准拉回 now（详见 lib/settle.js 的注释）。
       state = startupReset(state, Date.now())
-      syncVitalSettings() // 首帧就把三属性写进设置键（设置页打开即有值，含"首次安装写默认值"场景）
+      syncValueSettings() // 首帧就把成长/好感/精确好感值/等级名写进设置键（设置页打开即有值，含"首次安装写默认值"）
       const visible = api.settings.get(KEY_VISIBLE, true) !== false
-      await requestOverlay(visible)
+      await requestOverlay(visible) // 建窗成功会顺手 startClocks（五个定时器的唯一挂载点）
       if (disposed) return
       // ————— D-1（卡 17 修复）：启动成功即无条件复位诊断位 —————
       // 判据 = 首次状态已就绪（state 在本函数开头就已读档 + startupReset）且**本次启动没有创建失败**
@@ -797,19 +1095,22 @@ export default function pet(api) {
       // 必须被写回 ''，状态栏回到「宠物」。
       // 启动失败时**不**复位：刚写下的「宠物窗体创建失败：…」正是给用户排查用的线索。
       if (!lastCreateFailed) resetDiagnostic()
-      // tick 最后起：onTick 依赖 state 就绪；15 秒节拍（api.timer 单位是秒，api-reference.md:405-414）
-      api.timer.setInterval(TICK_ID, TICK_SECONDS, onTick)
-      // 随机表演的周期定时器（卡 18 / Q16：1 分钟（60 秒）一轮，宿主级定时器不被后台节流）。
-      // 与 tick 一样**无条件注册**：是否真的表演由 onRandomPerf 每轮自己判定（打盹不打扰、
-      // 拖动中不跑、无窗体的空转直接返回），所以不需要随 toggle/入睡反复挂摘。
-      api.timer.setInterval(RANDOM_PERF_TIMER_ID, RANDOM_PERF_EVERY_SEC, onRandomPerf)
+      // ————— v1 迁移收尾（必须排在诊断复位**之后**，否则刚写的迁移诊断会被它抹掉） —————
+      if (migratedFromV1) {
+        clearLegacyVitalKeys() // 三个旧设置键置空串（api.settings 无删除 API；manifest 也不再声明）
+        setDiagnostic(TEXT_MIGRATED_V1) // 迁移诊断只写一次（旧键已不存在，下次启动 migratedFromV1 为假）
+        // **立刻重写一次存档**：把 v1 的三属性与流水账字段从 state.json 里真正抹掉
+        // （`persist.serialize` 是白名单，写出来的文本里不再有它们）。不写这一手，
+        // 下次启动读到的还是带 hunger/clean/mood 的旧文件 ⇒ `migratedFromV1` 又为真、诊断再写一遍，
+        // "只写一次"就不成立。强制落盘（绕过写盘节流），只对 v1 老用户发生一次。
+        void persistState(Date.now(), true)
+      }
     } catch (err) {
       console.warn('[pet] 初始化异常（按可恢复处理）：' + errMsg(err))
       if (!state) state = initialState(Date.now()) // 兜底空态：消息面至少可用
       if (!disposed) {
         try {
-          api.timer.setInterval(TICK_ID, TICK_SECONDS, onTick) // 时钟兜底注册（同 id 重复设置会被宿主重置，幂等）
-          api.timer.setInterval(RANDOM_PERF_TIMER_ID, RANDOM_PERF_EVERY_SEC, onRandomPerf) // 随机表演兜底注册
+          startClocks() // 时钟兜底注册（同 id 重复设置会被宿主重置，幂等）
         } catch (err2) {
           console.warn('[pet] 定时器注册失败：' + errMsg(err2))
         }
@@ -821,13 +1122,9 @@ export default function pet(api) {
   return () => {
     disposed = true
     dragging = false // 停用期间到达的 drag 请求由 disposed 护栏拒绝，标志也不该卡在 true
-    // 两只周期定时器都要清：结算时钟 pet-tick 与随机表演 pet-perf（卡 18 / Q16；
-    // 后者取代了 Q10/Q14 那个一次性 setTimeout 的 pet-trot）
-    api.timer.clearInterval(RANDOM_PERF_TIMER_ID)
-    api.timer.clearInterval(TICK_ID) // 清结算时钟（无此 id 时宿主无操作，api-reference.md:413）
-    // 卡 19（R54）的第三只定时器：transient 到期推送（一次性 setTimeout）。不清它的话，
-    // 停用后回调仍会在宿主里排队（虽然 disposed 护栏会短路，但句柄必须释放）
-    api.timer.clearTimeout(TRANSIENT_TIMER_ID)
+    // **五个定时器全清**（design D-3 定时器表的"清理"列）：三只周期（pet-tick / pet-perf / pet-text）
+    // + 两只一次性（pet-bubble / pet-transient）。统一走 stopClocks，与窗体销毁同一条路径（单一挂摘点）。
+    stopClocks()
     hub.drain({ ok: false, error: TEXT.windowClosed }) // 丢弃全部 pending 长轮询（任务卡：cleanup 三件事之一）
     offMessage.dispose()
     offSettings.dispose()
