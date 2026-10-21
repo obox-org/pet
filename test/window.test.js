@@ -43,7 +43,7 @@ function countLog(rec, op) {
   return rec.overlayLog.filter((e) => e[0] === op).length
 }
 
-test('pet-window · 激活即自动创建：D-1 全参数（220×460 右下角透明置顶不占任务栏，URL 由 import.meta.url 推导）', async (t) => {
+test('pet-window · 激活即自动创建：D-1 全参数（220×460 右下角透明置顶不占任务栏，URL 显式拼 app://extensions/<安装目录名>/）', async (t) => {
   const { rec, cleanup } = activate(t)
   await flush()
   const creates = rec.overlayLog.filter((e) => e[0] === 'create')
@@ -57,9 +57,15 @@ test('pet-window · 激活即自动创建：D-1 全参数（220×460 右下角�
   assert.equal(opts.transparent, true)
   assert.equal(opts.alwaysOnTop, true)
   assert.equal(opts.skipTaskbar, true)
-  // URL 不硬编码 app://extensions/pet/：与测试进程按同一规则（入口文件位置 + ./dist/index.html）推导的结果全等
-  const expected = new URL('../dist/index.html', import.meta.url).href
-  assert.equal(opts.url, expected)
+  // D7（宿主模式适配）：入口在宿主进程里按 file:// 加载，直接拿 import.meta.url 推导会得到 file://，
+  // 而宿主的 overlay URL 校验只认 app: 协议 ⇒ 页面 URL 必须**显式拼** app://extensions/<安装目录名>/。
+  // 安装目录名从入口路径反推（= 宿主看到的扩展 id，不硬编码 pet）。
+  const dirName = decodeURIComponent(new URL('../', import.meta.url).pathname)
+    .split(/[\\/]/)
+    .filter(Boolean)
+    .pop()
+  assert.equal(opts.url, `app://extensions/${dirName}/dist/index.html`)
+  assert.equal(new URL(opts.url).protocol, 'app:', 'URL 必须是 app:// 形状（宿主 create 只认 app:）')
   assert.ok(rec.overlays.has('pet.overlay'), '窗体存活')
   cleanup()
 })

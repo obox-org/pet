@@ -13,6 +13,81 @@
 | 宠物 overlay 窗体 | 屏幕右下角 | 220×460 透明、无边框、置顶、不占任务栏 |
 | 状态栏诊断位 | 宿主状态栏右侧（`pet.status`） | 常态显示「宠物」；出错时显示可执行的中文文案 |
 
+## 运行位置（obox 2.0.0 宿主进程适配）
+
+obox **2.0.0** 起用户扩展的入口跑在 **Extension Host Process**（Electron `utilityProcess`：完整 Node、**没有 DOM / `window` / `document` / `localStorage`**，入口由宿主按 `file://` 动态 `import()`），只有页面代码在渲染进程。本扩展的三端分工：
+
+| 部分 | 跑在哪 | 说明 |
+| --- | --- | --- |
+| 入口 `index.js` + `lib/*.js` | **Extension Host Process** | `manifest.main` 指向它；它建窗、写盘、起定时器、跑消息处理器。**不得碰 DOM**（本扩展入口确实一个都没碰） |
+| 页面 `app/` → `dist/` | **渲染进程**的 overlay 页面（`app://` 静态页，iframe 内） | 有自己的 DOM 与 `localStorage`（本扩展**不用**）；只做渲染与指针交互，全部能力经消息桥回入口 |
+| 设置页 5 行 + 状态栏 | 宿主渲染（渲染进程 UI） | 入口写 `api.settings` / `api.statusBar`，宿主负责画 |
+
+回退开关（设置 → 通用 → 「在独立进程中运行扩展」，或 `OBOX_EXTENSION_HOST=0`）关掉后，入口回到渲染进程执行，其余不变——本扩展两种运行时都支持。
+
+### 浮层页面 URL 的构造方式（**宿主模式下唯一的硬阻塞点，已修**）
+
+页面 URL 的校验只认 `app:` 协议 + 本扩展目录（宿主 `src/main/appWindow.ts` 的 `isOverlayUrlInsideExtension`：协议、host、首段 = 扩展 id、必须有子路径、不得含 `..`）。而**宿主模式下入口的 `import.meta.url` 是 `file://`**，所以不能直接拿它当页面 URL：
+
+```js
+// ✗ 宿主模式下会得到 file:///…/extensions/pet_chenzhi/dist/index.html
+//   ⇒ 宿主 create 校验拒绝（"url 必须指向本扩展目录内的页面…"）⇒ 窗体建不出来、宠物完全不出现
+new URL('./dist/index.html', new URL('.', import.meta.url).href).href
+
+// ✓ 本扩展的实际写法（index.js 的 overlayPageUrl）：按协议分两条路
+// - 回退模式（入口经 app:// 加载）：相对推导，天然是 app://extensions|debug/<id>/dist/index.html
+// - 宿主模式（入口经 file:// 加载）：反推安装目录名，显式拼
+//   const dirName = decodeURIComponent(new URL('.', import.meta.url).pathname).split(/[\\/]/).filter(Boolean).pop()
+//   return `app://extensions/${dirName}/dist/index.html`
+```
+
+- **不硬编码 `app://extensions/pet/`**：安装目录名是 `<manifest.name>_<清洗后 author>`（本机为 `pet_chenzhi`），且它同时就是**宿主看到的扩展 id**（`main/capabilities.ts` 用目录名当 id）——所以反推出来的首段必然通过宿主的 `首段 === extId` 校验。
+- **"页面能加载"的判断依据**（三条，缺一不可）：① 拼出来的 URL 过宿主 `create` 的 `isOverlayUrlInsideExtension`（本次已用宿主真实函数验证：`file://` 形状被拒、`app://extensions/pet_chenzhi/dist/index.html` 通过）；② 页面里全部资源都是**相对路径**（`vite base: './'`，图集与清单是 `../assets/whale/*`）⇒ 落成 `app://extensions/<目录名>/dist/assets/…` 与 `app://extensions/<目录名>/assets/whale/…`，对应 `dist/` 与 `assets/` 都在打包白名单里；③ 宿主数据/源码目录不变，文件都在。
+- **验证边界（如实登记）**：本卡验到的是"URL 形状通过宿主校验 + 产物齐全"（用宿主真实校验函数与安装态目录名模拟跑通）；**页面在宿主模式的真机加载**属 obox 的 D8 实机验证卡，本卡未在真机 GUI 上跑。若实机仍不加载，先打印入口的 `import.meta.url` 与拼出的 URL 对照（很可能宿主接缝另有改动）。
+- 页面**不允许**内联 `<script>`（srcdoc 会继承 CSP）；本扩展的产物是外部脚本，不受影响。
+
+### 宿主模式下已知不可用的功能（技术债 #13，未修，属宿主侧）
+
+**症状**：入口创建的 overlay 收不到 `api.app.onMessage`。原因是消息桥按 `overlayId` 找所属扩展的路由表（`overlayOwners`）只在**渲染侧**的 `api.overlay.create` 里回填，而宿主模式下 overlay 由宿主创建（`src/main/appWindow.ts` 的 `createOverlayWindow`），渲染侧那张表是空的 ⇒ 页面发来的请求一律回 `{ ok:false, error:'扩展未注册消息处理器' }`（`src/renderer/src/core/host.ts` 的 `handleExtensionMessage` / `resolveMessageExtId`）。登记见 `docs/extension-host-migration.md` 的 #13。
+
+本扩展**完全依赖**页面 → 入口这一向（六条通道：`pet.ready` / `pet.state` / `pet.subscribe` / `pet.interact` / `pet.hit` / `pet.drag`），所以受影响的不是某个小功能，而是全部交互：
+
+| 功能 | 宿主模式下（#13 未修） | 关掉「在独立进程中运行扩展」后 |
+| --- | --- | --- |
+| 窗体出现 + 精灵与呼吸待机动画 | ✅ 正常（页面本地资源 + 本地帧时钟） | ✅ |
+| 面板等级名 / 库存数字 | ❌ 永远是空等级名与空态默认（3/3）——状态一次都拿不到，`syncing` 常驻 | ✅ |
+| 悬停弹面板、点宠物摸头、喂食 / 洗澡 | ❌ 入口收不到 `pet.hit` ⇒ 从不 `setMouseThrough(false)` ⇒ 窗体保持创建时的**整窗穿透**，连点击都进不到页面（悬停、Tab 焦点同理） | ✅ |
+| 气泡（互动反馈、定时文本） | ❌ 入口侧定时器照跑，但推送不出去 | ✅ |
+| 拖动换位 | ❌ `pet.drag` 无人受理 | ✅ |
+| 随机表演 | ❌ 入口写的 `transient` 推不出来，只剩本地 idle 循环 | ✅ |
+| 设置页 5 行数值、成长/好感结算、`state.json` 落盘 | ✅ 全部在入口侧，不经过消息桥 | ✅ |
+
+**恢复办法**：设置 → 通用 → 关掉「在独立进程中运行扩展」（或 `OBOX_EXTENSION_HOST=0`）后**重启**应用；代价是失去宿主进程隔离与完整 Node。宿主侧修法（不属本仓）见 #13 的退场条件：`host.overlay.create` 成功后把 `(overlayId → extId)` 同步给渲染侧。
+
+### 持久化归属：页面无本地存储，真数据在入口
+
+- **页面**：全仓 grep **零处** `localStorage` / `sessionStorage`——页面状态只是 `App.vue` 里的内存 `ref`，窗口销毁即丢。这不是缺陷：页面本就不承担持久化（也避免"页面存一份、入口存一份"两处真相）。
+- **入口**：唯一持久化是 `api.fs` 写在 `<userData>/extensions/<安装目录名>/data/state.json`（写入走 `state.json.tmp` 读回校验，损坏时备份 `state.json.bad` 并按初始值重建）。宿主模式下 `api.fs` 的根仍是 **`<扩展目录>/data`**（`src/extension-host/apiFactory.ts` 的 `extensionDataDirOf`，与渲染进程模式逐字同一路径）⇒ **开关来回切不会丢档**。
+
+### 定时器与宿主进程
+
+五个定时器**全部**走 `api.timer`（宿主级、整数秒），没有任何裸 `setInterval` / `setTimeout`：三只周期（`pet-tick` 60s、`pet-perf` 60s、`pet-text` 300s）+ 两只一次性（`pet-bubble` 4s、`pet-transient` 按剩余秒数）。挂摘点各只有一处：建窗成功 `startClocks()`，销毁窗体与停用 `stopClocks()`（关窗即清，`rec.timers.size === 0`）。宿主模式下这些定时器由宿主进程实现，不随主窗口最小化节流。
+
+### 设置页的读写时序（`api.settings` 同步读，不改）
+
+`api.settings.get` 是**同步**签名，宿主只能读本地缓存；缓存靠渲染侧在 `host-renderer` 端口到达时推的那份快照校准（`src/renderer/src/core/extensionHostConsumer.ts` 的 `pushSnapshot`，早于 `init` 一个 IPC 往返）。所以：
+
+- **写方向不受影响**：成长值 / 好感 / 精确好感值 / 等级名 / 诊断位都是入口 `api.settings.set` 写出来的（宿主同步通知，设置页当帧刷新），**不依赖任何同步读**；
+- 唯一的同步读是 `pet.visible`（`init` 与 `onChanged` 各一次）。若快照真的还没到（异常时序，宿主会打一条 `数据面快照还没到…先返回缺省值` 的 warn），这一读会拿到默认 `true`：本次启动可能**多建一次窗体**（用户明明关着宠物），下一次 toggle 或重启即恢复。这是宿主侧时序的技术债，本仓不做"猜一次再重读"的绕法（没有可靠的"快照已到"信号可等）。
+
+### 激活时机与 `apiVersion`
+
+- **激活时机**：`manifest.json` **不写 `activationEvents` ⇒ 缺省 `*` = 启动即激活**。这正是常驻宠物要的：它没有 App 卡片、没有命令、没有视图，写 `onCommand:` / `onView:` 会**永不激活**。要显式化可以写 `"activationEvents": ["*"]`，与本字节行为完全等价，本次不改（避免为等价声明改动已发版清单）。
+- **`apiVersion` 保持 `2`（本次不上调 3）**，理由三条：
+  1. 本扩展用到的能力 v2 就已全部具备（`api.overlay` 四方法、`progress`/`status` 设置字段、整数秒 `api.timer`；`api.fs` / `api.settings` 更早就有），**宿主模式下这些能力的契约没变**（数据目录逐字同一路径）；
+  2. 它**不依赖**任何 v3 才存在的宿主专属能力——不用 `api.globalState` / `workspaceState`（技术债 #16 的 memento 隔离差异与本扩展无关：入口从不读写 memento）；
+  3. `apiVersion` 的语义是"**最低** API 门槛"，不是"我要跑在宿主里"的声明。写 3 会让 ≤ 1.0.17 的宿主**直接拒载**本扩展，而它在渲染进程模式下功能完全可用（页面 URL 保留了 `app://` 相对推导分支）⇒ 没有理由收窄兼容面。
+
 ## 玩法
 
 ### 互动与道具
@@ -112,13 +187,13 @@ v2 是一次**业务模型重做**，下面这些 v1 能力被整体移除（不
 
 ## 最低宿主版本
 
-需要 **`apiVersion ≥ 2` 的 obox**（宿主仓库 `package.json` 当前 `apiVersion: 2`）。本扩展依赖 v2 才有的能力：
+需要 **`apiVersion ≥ 2` 的 obox**（宿主仓库 `package.json` 当前 `apiVersion: 3`；**2.0.0 起用户扩展默认在宿主进程里执行**，见「运行位置」一节的适配说明）。本扩展依赖 v2 才有的能力：
 
 - `api.overlay.create / destroy / setMouseThrough / setPosition`：透明 overlay 窗体——不注册卡片、不进启动器 / 导航区，作用域限定只能操作本扩展自己创建的窗体，宿主停用 / 卸载扩展时自动回收；`setPosition`（拖动换位用）按主显示器工作区**兜底钳位**并在成功回包里带上**钳制后的实际坐标** `position`，入口用它校正自记位置；
 - 设置页 `progress` / `status` 字段类型（好感进度条 + 成长值 / 好感精确值 / 等级名 / 诊断位四条只读文本行）；
 - `api.timer` 的整数秒 `setInterval` / `setTimeout`（三只周期定时器与两只一次性定时器）。
 
-扩展清单已声明 `apiVersion: 2`；老宿主会按门槛**拒绝加载**，扩展在管理器里标红并提示：`需要 obox API v2 或更高（当前 obox 为 vN）`（`src/renderer/src/core/manifest.ts:35`）。
+扩展清单已声明 `apiVersion: 2`；老宿主会按门槛**拒绝加载**，扩展在管理器里标红并提示：`需要 obox API v2 或更高（当前 obox 为 vN）`（`src/renderer/src/core/manifest.ts:35`）。**为什么不上调 3**：本扩展不依赖任何 v3 专属能力（不用 `api.globalState` / `workspaceState`），而 `apiVersion` 是"最低门槛"声明——写 3 会让 ≤ 1.0.17 的宿主直接拒载，却没有换来任何能力，详见「运行位置」一节的结论与三条理由。
 
 ## 安装与调试
 
@@ -133,7 +208,8 @@ v2 是一次**业务模型重做**，下面这些 v1 能力被整体移除（不
   npm run dev -- -- --remote-debugging-port=9333 --debug-extension pet@<路径>
   ```
 
-  调试扩展经 `app://debug/pet/` 加载：不写 userData、管理器显示「调试中」、不可卸载、重启消失；改代码后**重载窗口**生效（入口是动态 import，模块缓存不自动失效）。
+  调试扩展经 `app://debug/pet/` 加载：管理器显示「调试中」、不可卸载、重启消失；改代码后**重载窗口**生效（入口是动态 import，模块缓存不自动失效）。
+  **调试扩展不进宿主进程**（`src/renderer/src/core/loader.ts` 的 `collectHostedExtensions` 只收 `source === 'user'`）⇒ `--debug-extension` 下入口仍在渲染进程执行、页面 URL 走 `app://debug/<id>/` 的相对推导分支。要在真机上验宿主模式，请装 `.oix`（或用安装态对照开关前后两种行为）。
 
 ## 开发
 
@@ -188,7 +264,7 @@ npm run pack       # 先 build 再打包 → out/pet-2.0.0.oix（18 个条目，
 | 路径 | 说明 | 进 `.oix` |
 | --- | --- | --- |
 | `manifest.json` | 扩展清单（`version: 2.0.0`、`apiVersion: 2`、`main: "./index.js"`；contributes = `statusBarItems` + `settings` 6 字段） | ✓（根条目） |
-| `index.js` | 入口：纯 ESM，`default` 导出插件函数、返回 cleanup；只做接线，顶层零副作用 | ✓ |
+| `index.js` | 入口：纯 ESM，`default` 导出插件函数、返回 cleanup；只做接线，顶层零副作用；**跑在 Extension Host Process**（obox 2.0.0 起） | ✓ |
 | `lib/*.js` | **9 个**纯函数模块：`constants`（阈值/键名/文案单一来源）、`growth`（成长与等级）、`items`（库存）、`interact`（互动判定）、`mapping`（状态→轨与帧几何）、`persist`（存档读写与迁移）、`settle`（成长/挂机结算）、`texts`（128 条文本与取样）、`bridge`（长轮询 hub 与视图） | ✓ |
 | `dist/` | `vite build` 产物（overlay 窗体页面；gitignore，pack 时重建） | ✓ |
 | `assets/whale/` | 鲸鱼娘图集（上游原字节）+ `LICENSE` + `pet.json` + `PROVENANCE.md` | ✓ |

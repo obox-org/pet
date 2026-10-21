@@ -57,6 +57,49 @@ function errMsg(err) {
   return err && err.message ? err.message : String(err)
 }
 
+/** overlay 页面在扩展目录内的相对路径（`vite build` 的 outDir = dist，见 vite.config.ts） */
+const OVERLAY_PAGE_PATH = 'dist/index.html'
+
+/**
+ * 从入口模块的 URL 推出 overlay 页面的 `app://` 地址（d7：宿主进程适配的**唯一**硬阻塞点）。
+ *
+ * 为什么要分两条路：入口在两个运行时里的 `import.meta.url` 协议不同——
+ * - **宿主进程（2.0.0 默认）**：宿主按磁盘路径 `pathToFileURL(entryPath)` 动态 `import()` 入口
+ *   （`src/extension-host/loader.ts:196`）⇒ `import.meta.url` 是 `file:///…`。此时
+ *   `new URL('./dist/index.html', import.meta.url)` 得到的是 `file:///…/dist/index.html`，
+ *   而宿主 `createOverlayWindow` 的 URL 校验只认 `app:` 协议（`src/main/appWindow.ts:272-286`
+ *   的 `isOverlayUrlInsideExtension`：protocol ≠ `app:` 直接 false）⇒ `create` 返回
+ *   `{ ok:false, error:'url 必须指向本扩展目录内的页面…' }`，窗体根本建不出来（宠物完全不出现）。
+ * - **回退开关关闭（入口在渲染进程执行）**：入口经 `app://extensions|debug/<id>/index.js` 加载，
+ *   相对推导本来就是对的，保持原写法（老宿主 1.0.x 也走这条路）。
+ *
+ * 宿主模式下安装目录名怎么来：`app://extensions/<段>` 的 `<段>` 同时是**宿主看到的扩展 id**
+ * （`main/capabilities.ts:75-80` 用目录名当 id，`main/oixCore.ts:56-60` 的目录名是
+ * `<manifest.name>_<清洗后 author>`，与 `manifest.name` 不同）⇒ 不能硬编码 `pet`，
+ * 只能从入口的磁盘路径反推最后一段（与 `docs/extension-api/guides-user.md` 的「静态资源 URL」同法）。
+ * 因为宿主模式下 `ext.id` 就是这个目录名，拼出来的 URL 必然通过 `rest.slice(0, slash) === extId` 这段校验。
+ *
+ * @param {string} entryUrl 入口模块的 `import.meta.url`
+ * @returns {string} 页面 URL（宿主/回退两种运行时的形状都是 `app://…`）
+ */
+function overlayPageUrl(entryUrl) {
+  const base = new URL('.', entryUrl)
+  if (base.protocol !== 'file:') {
+    return new URL(OVERLAY_PAGE_PATH, base).href
+  }
+  const segments = decodeURIComponent(base.pathname)
+    .split(/[\\/]/)
+    .filter(Boolean)
+  const dirName = segments.length > 0 ? segments[segments.length - 1] : ''
+  if (!dirName) {
+    // 理论上到不了（入口必是磁盘上的文件）：退回 file:// 让宿主的 URL 校验给出明确的拒绝日志，
+    // 比在这里抛错（会让整个激活失败、连状态栏都没有）更容易排查
+    console.warn('[pet] 无法从入口路径反推安装目录名，overlay URL 退回入口目录：' + entryUrl)
+    return new URL(OVERLAY_PAGE_PATH, base).href
+  }
+  return 'app://extensions/' + encodeURIComponent(dirName) + '/' + OVERLAY_PAGE_PATH
+}
+
 /** 诊断位的"窗体创建失败"前缀（恢复后只清同类诊断，不误清保存失败的文案） */
 const TEXT_CREATE_FAILED_PREFIX = TEXT.createFailedPrefix
 
@@ -89,11 +132,11 @@ const KEY_LEVEL = 'pet.level'
 const TEXT_MIGRATED_V1 = '已从 v1 迁移：三属性已丢弃'
 
 export default function pet(api) {
-  // ————— 路径：用 import.meta.url 推导，不硬编码 app://extensions/pet/ —————
+  // ————— 路径：不硬编码 app://extensions/pet/，但宿主模式下必须显式拼 app:// —————
   // 安装目录名是 <name>_<清洗后 author>（如 pet_chenzhi），与 manifest.name 不同；
-  // 调试态又是 app://debug/<id>/（docs/extension-api/guides-user.md:79-88）。
-  const base = new URL('.', import.meta.url).href
-  const overlayUrl = new URL('./dist/index.html', base).href // 卡 08 的构建产物（vite outDir=dist）
+  // 调试态又是 app://debug/<id>/；宿主模式下 import.meta.url 是 file://（细节与判据见 overlayPageUrl）。
+  // 卡 08 的构建产物：vite outDir=dist ⇒ 页面是 <扩展目录>/dist/index.html。
+  const overlayUrl = overlayPageUrl(import.meta.url)
 
   // ————— 运行时状态（全部在插件函数内，随 cleanup 一起消亡） —————
   let state = null // 权威 PetState（lib/persist.js 的形状）；null = 存档还没加载完
