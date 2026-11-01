@@ -65,12 +65,12 @@ test('卡15 面板 · MUST NOT 渲染三属性、也不渲染任何数字：模�
   assert.ok(tpl.includes('class="level-row"') && tpl.includes('state.values.levelName'), '等级行保留（只读等级名）')
 })
 
-test('卡17 面板 · 两枚图标按钮横向一行：喂食 / 洗澡，关闭按钮仍在 DOM 最后（Tab 顺序）', () => {
+test('卡17 面板 · 两枚图标按钮横向一行：喂食 / 洗澡，**没有关闭按钮**（用户要求，Tab 只有两站）', () => {
   const tpl = templateOf(panel)
   assert.equal(tpl.split('class="act"').length - 1, 2, '恰好两枚 class="act" 按钮（v1 的第三枚已删）')
   assert.equal(tpl.includes('TEXT.hide'), false, '面板不再有"隐藏"按钮')
   assert.equal(tpl.includes("emit('hide')"), false)
-  // DOM 顺序 = Tab 顺序：喂食 → 洗澡 → 关闭面板（关闭按钮必须最后）
+  // DOM 顺序 = Tab 顺序：喂食 → 洗澡（关闭按钮已按用户要求移除，Tab 没有第三站）
   const order = [':aria-label="TEXT.feed"', ':aria-label="TEXT.bathe"']
   let last = -1
   for (const wiring of order) {
@@ -78,7 +78,8 @@ test('卡17 面板 · 两枚图标按钮横向一行：喂食 / 洗澡，关闭�
     assert.ok(at > last, `${wiring} 的顺序应在前一枚之后（DOM 顺序 = Tab 顺序）`)
     last = at
   }
-  assert.ok(tpl.indexOf('class="close"') > last, '关闭按钮排在洗澡之后（Tab 最后一站）')
+  assert.equal(tpl.includes('class="close"'), false, '面板没有关闭按钮（关闭路径：离开窗体 / Esc / 失焦）')
+  assert.equal(tpl.includes("emit('close')"), false, '也没有 close 事件接线')
   // 每枚按钮：aria-label 是中文动作名（可访问名）；**没有常驻文字标签**，动作名只在 `.tip` 浮层里
   for (const [kind, name] of [
     ['feed', '喂食'],
@@ -101,7 +102,7 @@ test('卡17 面板 · 两枚图标按钮横向一行：喂食 / 洗澡，关闭�
   assert.equal(style.includes('@font-face'), false, '不得用图标字体')
   assert.equal(/font-family:\s*['"]?(icon|icomoon|FontAwesome)/i.test(style), false, '不得用图标字体族')
   // 横向一行、间距 8px（两枚 28×28 固定尺寸，远窄于 200px 面板）
-  const css = style.slice(style.indexOf('.actions {'), style.indexOf('.close {'))
+  const css = style.slice(style.indexOf('.actions {'), style.indexOf('.sync-hint'))
   assert.match(css, /flex-direction: row/, '两枚按钮横向一行（不是纵排）')
   assert.match(css, /gap: 8px/, '按钮间距 8px')
   // 图标规格逐字：22px、fill none、stroke 白色（Q17）、线宽 1.6、圆头圆角
@@ -137,12 +138,20 @@ test('卡18 面板 · 图标按钮：底色透明（无渐变）、悬浮 token 
   assert.match(off.slice(0, 200), /cursor: not-allowed/)
 })
 
-test('卡18 面板 · 悬浮浮层 .tip：定位在图标上方、token 玻璃底 + token 文字 + 6px 圆角，hover/focus-visible 即时可见（无延迟）', () => {
+test('卡18 面板 · 悬浮浮层 .tip：浮到面板上方（不压等级行）、token 玻璃底 + token 文字 + 6px 圆角，hover/focus-visible 即时可见（无延迟）', () => {
   const style = styleOf(panel)
   const tip = style.slice(style.indexOf('.tip {'), style.indexOf('.icon {'))
   assert.ok(tip.length > 0, '.tip 浮层样式存在')
   assert.match(tip, /position: absolute/, '自绘浮层（不是原生 title）')
-  assert.match(tip, /bottom: calc\(100% \+ 6px\)/, '定位在图标上方')
+  assert.match(tip, /bottom: calc\(100% \+ 8px\)/, '浮到面板上方（基准是 .panel，不是按钮）')
+  // 基准必须是 .panel：按钮若还声明 position: relative，浮层会贴回按钮、压住等级行（真机反馈过）。
+  // 只匹配**声明**（注释里提到这个属性名不算），避免把解释性注释误判成违规。
+  assert.ok(
+    !/(^|\n)\s*position:\s*relative\s*;/.test(
+      style.slice(style.indexOf('.act {'), style.indexOf('.act:not'))
+    ),
+    '.act 不能声明 position: relative，否则浮层又贴回按钮、压住等级行'
+  )
   assert.match(tip, /background: var\(--bg-panel\)/, '玻璃底用宿主 token（不新造色值）')
   assert.match(tip, /color: var\(--fg-bright\)/, '文字用宿主 token')
   assert.match(tip, /border-radius: 6px/, '6px 圆角')
@@ -183,8 +192,8 @@ test('卡17 面板 · 禁用态：道具不足用 aria-disabled（不是 disable
   assert.match(off.slice(0, 200), /opacity: 0\.45/, '禁用态 opacity .45（色值表）')
   assert.match(off.slice(0, 200), /cursor: not-allowed/, '禁用态 cursor: not-allowed')
   assert.equal(/\.icon\s*\{[^}]*opacity/.test(style), false, '禁用只调按钮透明度，不改图标形状/配色')
-  // 焦点必然落进面板：两枚都可用 aria-disabled ⇒ 第一枚恒可聚焦（不再需要"顺延到第一个可用按钮"）
-  assert.match(script, /buttons\[0\] \?\? closeBtn\.value/, '焦点落第一枚（喂食）')
+  // 焦点必然落进面板：两枚都可用 aria-disabled ⇒ 第一枚恒可聚焦（关闭按钮已移除，不再需要兜底）
+  assert.match(script, /const target = buttons\[0\]/, '焦点落第一枚（喂食）')
 })
 
 test('卡15 面板 · 只用宿主 token、不接主题桥、不用背景模糊滤镜（design 硬约束 1/2 + D-11 复核第 3 条）', () => {
@@ -436,7 +445,7 @@ test('卡18/19 · 入口自发表演的本地锁存：播完一轮置锁存、�
 test('卡18 面板开合 · 开合判定是纯同步的：不依赖过渡、不依赖任何延时定时器，命中矩形随 panelOpen 即时变化', () => {
   // ① 判定源头：panelShouldOpen 是纯函数，panelOpen 是只依赖三个 ref 的 computed（无定时器/过渡事件）
   assert.match(app, /const panelOpen = computed\(\(\) => panelShouldOpen\(hovered\.value, focusOpened\.value, dragging\.value\)\)/)
-  const close = app.slice(app.indexOf('function closePanel('), app.indexOf('function onPanelClose()'))
+  const close = app.slice(app.indexOf('function closePanel('), app.indexOf('function onEscapeClose()'))
   assert.match(close, /focusOpened\.value = false/, '关面板同步翻转焦点展开位')
   assert.match(close, /hovered\.value = false/, '关面板同步翻转命中位')
   assert.match(close, /boxesCache = null/, '关面板同步作废命中矩形缓存')
@@ -455,3 +464,11 @@ test('卡18 面板开合 · 开合判定是纯同步的：不依赖过渡、不�
   assert.equal(app.includes('@leave'), false, '没有 Transition 的 JS 钩子参与开合')
 })
 
+test('卡17 面板 · 指针离开窗体 ⇒ 面板立即关闭（用户反馈：原来没有自动关闭）', () => {
+  const appSrc = app
+  const gone = appSrc.slice(app.indexOf('function onPointerGone()'), app.indexOf('function onPointerOut('))
+  assert.match(gone, /hasPointer = false/, '离开时清指针态')
+  assert.match(gone, /hovered\.value = false/, '离开时清命中态')
+  // 关键：面板必须跟着关（且不抢焦点 —— 指针已经不在窗体里）
+  assert.match(gone, /if \(panelOpen\.value\) closePanel\(false\)/, '离开文档 ⇒ closePanel(false)（不抢焦点）')
+})

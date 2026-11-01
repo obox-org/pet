@@ -563,10 +563,6 @@ function closePanel(dismiss = false): void {
   boxesCache = null
 }
 
-function onPanelClose(): void {
-  closePanel(true)
-}
-
 function onEscapeClose(): void {
   closePanel(true)
 }
@@ -767,6 +763,9 @@ function onPointerGone(): void {
   hovered.value = false
   needLeaveBeforeReopen = false
   boxesCache = null
+  // 指针离开整个文档 ⇒ 面板**立即关闭**（用户反馈："鼠标没有悬停自动关闭"）。
+  // 传 `false`：指针已经不在窗体里，不该再把焦点抢回精灵（那会让键盘用户莫名其妙获得焦点）。
+  if (panelOpen.value) closePanel(false)
   syncInside()
 }
 
@@ -968,7 +967,6 @@ onMounted(async () => {
             :state="display"
             :syncing="syncing"
             @interact="onPanelInteract"
-            @close="onPanelClose"
           />
         </Transition>
       </div>

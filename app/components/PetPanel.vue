@@ -46,11 +46,10 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'interact', kind: 'feed' | 'bathe'): void
-  (e: 'close'): void
 }>()
 
 const rootEl = ref<HTMLElement | null>(null)
-const closeBtn = ref<HTMLButtonElement | null>(null)
+// 面板不再有关闭按钮：焦点落点只有两枚动作按钮
 
 /**
  * 两枚动作的可用性（specs/pet-economy）：喂食要有小鱼干、洗澡要有沐浴泡泡。
@@ -80,7 +79,7 @@ function onAct(kind: 'feed' | 'bathe'): void {
  */
 onMounted(() => {
   const buttons = Array.from(rootEl.value?.querySelectorAll<HTMLButtonElement>('button.act') ?? [])
-  const target = buttons[0] ?? closeBtn.value
+  const target = buttons[0]
   target?.focus({ preventScroll: true })
 })
 </script>
@@ -142,12 +141,9 @@ onMounted(() => {
     <p v-if="syncing" class="sync-hint">{{ TEXT.syncing }}</p>
 
     <!--
-      关闭按钮排在 DOM 最后 ⇒ Tab 顺序 = 精灵 → 喂食 → 洗澡 → 关闭面板（design UX 节）；
-      视觉上它绝对定位在面板右上角，不占等级行的文本宽度。
+      面板**没有关闭按钮**（用户要求）：关闭路径只剩「指针离开窗体」「Esc」「窗体失焦」三条。
+      Tab 顺序因此是 精灵 → 喂食 → 洗澡，不再有第四站。
     -->
-    <button ref="closeBtn" type="button" class="close" :aria-label="TEXT.closePanel" @click="emit('close')">
-      ✕
-    </button>
   </section>
 </template>
 
@@ -210,7 +206,11 @@ onMounted(() => {
 }
 
 .act {
-  position: relative; /* `.tip` 浮层的定位基准 */
+  /*
+   * **不再**给按钮 `position: relative`：`.tip` 的定位基准上移到 `.panel`（唯一的 positioned 祖先）。
+   * 为什么改：浮层原来贴在按钮正上方，而按钮行紧挨着等级行 ⇒ 一悬停就把「好感等级名」盖掉
+   * （真机反馈"好感度显示被覆盖了"）。抬到面板上方后浮层落在窗体的空白区，不再压任何文字。
+   */
   box-sizing: border-box;
   width: 28px;
   height: 28px;
@@ -263,9 +263,10 @@ onMounted(() => {
  */
 .tip {
   position: absolute;
-  bottom: calc(100% + 6px);
-  left: 50%;
-  transform: translateX(-50%);
+  /* 浮到**面板上方**（不是按钮上方）：面板顶边 - 8px，落进窗体空白区。
+     原来的 `bottom: calc(100% + 6px)` 是相对按钮的 ⇒ 正好压住上方的等级行。 */
+  bottom: calc(100% + 8px);
+  left: 10px; /* 与面板左内边距对齐（第一枚按钮）；第二枚由下方规则右移 */
   padding: 3px 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -279,6 +280,11 @@ onMounted(() => {
   visibility: hidden;
   opacity: 0;
   z-index: 1;
+}
+
+/* 第二枚按钮（洗澡）的浮层右移到该按钮上方：左内边距 10 + 按钮 28 + 间距 8 = 46px */
+.act + .act .tip {
+  left: 46px;
 }
 
 .act:hover .tip,
@@ -308,33 +314,6 @@ onMounted(() => {
   stroke-width: 1.6;
   stroke-linecap: round;
   stroke-linejoin: round;
-}
-
-.close {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  background: var(--hover-bg);
-  color: var(--fg-dim);
-  font-family: inherit;
-  font-size: var(--font-size-sm);
-  line-height: 1;
-  cursor: pointer;
-}
-
-/*
- * 键盘焦点环：白色 2px（卡 19 / 裁定 **R53**，复验报告 O-2）。
- * 与 `.act:focus-visible` 逐字一致（同为白色 2px、同样只在 `:focus-visible` 下画，
- * 鼠标点按不画环）；`aria-label` 等可访问属性一律不动（本次只改颜色环）。
- */
-.close:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px #ffffff;
 }
 
 .sync-hint {

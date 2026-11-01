@@ -196,26 +196,19 @@ test('卡19 · 删除项防回归：入口与页面都不再有任何"按状态�
 
 // ————— 顺带：✕ 关闭按钮焦点环改白色（父代理裁定 R53 / 复验报告 O-2） —————
 
-test('卡19 · R53：✕ 关闭按钮的 :focus-visible 环为白色 2px（与两枚图标按钮统一），可访问属性不动', () => {
+test('卡19 · R53：面板已无 ✕ 关闭按钮，焦点环只剩两枚图标按钮的白色 2px', () => {
   const style = panel.slice(panel.indexOf('<style scoped>'))
-  const close = style.slice(style.indexOf('.close:focus-visible'), style.indexOf('.sync-hint'))
-  assert.ok(close.length > 0, '定位到关闭按钮的焦点环规则')
-  assert.match(close, /outline: none/, '沿用既有口径：不留系统轮廓')
-  assert.match(close, /box-shadow: 0 0 0 2px #ffffff/, '白色 2px（与 .act:focus-visible 逐字一致）')
-  assert.equal(/rgba\(/.test(close.slice(0, close.indexOf('}'))), false, '焦点环规则内不再有任何半透明色（旧青色是 rgba 形式）')
+  // 用户要求移除关闭按钮 ⇒ 再留着 `.close*` 规则就是死代码，且会让人以为还有第三站
+  assert.equal(style.includes('.close'), false, '关闭按钮的样式规则已整条删除')
+  const tpl = panel.slice(panel.indexOf('<template>'), panel.indexOf('</template>'))
+  assert.equal(tpl.includes('class="close"'), false, '模板里没有关闭按钮')
+  assert.equal(tpl.includes('TEXT.closePanel'), false, '可访问名也不再用到 closePanel')
+  // 焦点环口径仍然只有一条：图标按钮白色 2px，且不留系统轮廓
+  const act = style.slice(style.indexOf('.act:focus-visible'), style.indexOf('.sync-hint'))
+  assert.match(act, /outline: none/, '沿用既有口径：不留系统轮廓')
+  assert.match(act, /box-shadow: 0 0 0 2px #ffffff/, '白色 2px')
   assert.equal(/rgba\(56, 189, 248/.test(panel), false, '旧的青色焦点环色值已整条消失')
   assert.equal(/#38bdf8/.test(panel), false, '短写形式同样不再出现')
-  // 与两枚图标按钮的焦点环逐字一致（"统一"是可断言的，不是观感描述）
-  const act = style.slice(style.indexOf('.act:focus-visible'), style.indexOf('.tip {'))
-  assert.match(act, /box-shadow: 0 0 0 2px #ffffff/, '图标按钮是白色 2px')
-  assert.equal(
-    close.slice(close.indexOf('box-shadow'), close.indexOf('}', close.indexOf('box-shadow'))),
-    act.slice(act.indexOf('box-shadow'), act.indexOf('}', act.indexOf('box-shadow'))),
-    '两处焦点环属性逐字相同'
-  )
-  // 只改颜色环：aria-label / 关闭行为 / 两枚图标不受影响
-  assert.match(panel, /:aria-label="TEXT\.closePanel"/, '关闭按钮的 aria-label 未动')
-  assert.match(panel, /@click="emit\('close'\)"/, '关闭行为未动')
-  // v2 的面板只剩两枚互动图标（v1 的第三枚已随 play kind 删除）
-  assert.equal((panel.slice(panel.indexOf('<template>'), panel.indexOf('</template>')).match(/<svg/g) ?? []).length, 2, '两枚图标仍在')
+  // 两枚图标仍在
+  assert.equal((tpl.match(/<svg/g) ?? []).length, 2, '两枚图标仍在')
 })

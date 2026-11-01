@@ -263,9 +263,9 @@ test('卡05 面板 · 互动区**恰好两枚** .act（喂食/洗澡），可访
 
   const feedAt = tpl.indexOf(':aria-label="TEXT.feed"')
   const batheAt = tpl.indexOf(':aria-label="TEXT.bathe"')
-  const closeAt = tpl.indexOf('class="close"')
   assert.ok(feedAt >= 0 && batheAt > feedAt, 'DOM 顺序 = 喂食 → 洗澡')
-  assert.ok(closeAt > batheAt, '关闭按钮排在最后（Tab 顺序：精灵 → 喂食 → 洗澡 → 关闭面板）')
+  // 用户要求移除关闭按钮 ⇒ Tab 序只剩两站（精灵 → 喂食 → 洗澡）
+  assert.equal(tpl.includes('class="close"'), false, '面板没有关闭按钮')
 
   // 不可用态用 aria-disabled（键盘可达），不用原生 disabled（会被移出 Tab 序列）
   assert.equal(tpl.split(':aria-disabled=').length - 1, 2, '两枚都按可用性输出 aria-disabled')
@@ -318,8 +318,8 @@ test('卡05 面板 · 图标白色描边 + 白色 2px 焦点环 + .tip 即时显
 
   const actFocus = style.slice(style.indexOf('.act:focus-visible'), style.indexOf('.tip {'))
   assert.match(actFocus, /box-shadow: 0 0 0 2px #ffffff/, '图标按钮焦点环白色 2px')
-  const closeFocus = style.slice(style.indexOf('.close:focus-visible'))
-  assert.match(closeFocus.slice(0, 200), /box-shadow: 0 0 0 2px #ffffff/, '关闭按钮焦点环同样白色 2px（R53）')
+  // 关闭按钮已移除（用户要求）⇒ 焦点环口径只剩图标按钮这一条
+  assert.equal(style.includes('.close'), false, '关闭按钮的样式规则已删除')
 
   const tip = style.slice(style.indexOf('.tip {'), style.indexOf('.icon {'))
   assert.match(tip, /position: absolute/, '.tip 是自绘浮层')
