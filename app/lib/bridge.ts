@@ -94,6 +94,23 @@ export function unwrap(result: BridgeResult): {
  * 为什么监听挂在 `window` 而不是 `parent`：页面自己就是 iframe 里的文档，回包由父文档
  * `postMessage` 到 `e.source`（src/renderer/src/AppWindow.vue:126-136），落在本页 `window` 上。
  */
+/**
+ * 把外壳页下发的主题 token 写到本文档的 `:root`。
+ *
+ * 只接受 `--x` 形状的名字与字符串值（与宿主 `shared/themeTokens.ts` 同一规则）：
+ * 这条消息来自父文档，不能让它往 `documentElement.style` 上写任意属性。
+ * 写成内联样式（`style.setProperty`）优先级高于页面自己的 `:root` 规则，主题切换即时生效。
+ */
+function applyThemeTokens(tokens: unknown): void {
+  if (!isRecord(tokens)) return
+  const root = document.documentElement
+  for (const [name, value] of Object.entries(tokens)) {
+    if (!/^--[a-z0-9-]+$/.test(name)) continue
+    if (typeof value !== 'string' || value.trim() === '') continue
+    root.style.setProperty(name, value.trim())
+  }
+}
+
 export function createBridge(appId: string): Bridge {
   const pending = new Map<string, { resolve: (r: BridgeResult) => void; timer: number }>()
   let seq = 0
@@ -111,9 +128,24 @@ export function createBridge(appId: string): Bridge {
 
   function onMessage(event: MessageEvent): void {
     const data = event.data as
-      | { source?: string; action?: string; requestId?: unknown; result?: unknown }
+      | {
+          source?: string
+          action?: string
+          requestId?: unknown
+          result?: unknown
+          tokens?: unknown
+        }
       | null
     if (!isRecord(data) || data.source !== 'obox-app') return
+    // 主题 token（host → 页面）：外壳页把当前生效的 25 个 token 下发到 iframe。
+    // 为什么必须自己接：浮层窗口 = 外壳页 + iframe，CSS 自定义属性**不跨文档**，
+    // 宿主/外壳写 `documentElement` 对这里无效 ⇒ 只写 `var(--bg-panel)` 会解析为空、
+    // 面板整块透明（2.0.x 实测）。applyThemeTokens 写在本文档的 :root 上即可生效。
+    if (data.action === 'obox-theme') {
+      if (framed && event.source !== window.parent) return
+      applyThemeTokens(data.tokens)
+      return
+    }
     if (data.action !== 'obox-extension-reply') return
     // 只认自己发出去的 requestId：桥是共享通道，别的来源的消息不能污染状态
     if (framed && event.source !== window.parent) return
