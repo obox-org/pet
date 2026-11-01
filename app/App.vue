@@ -935,6 +935,7 @@ onMounted(async () => {
     <div
       ref="spriteEl"
       class="sprite"
+      :class="{ dragging }"
       :style="spriteStyle"
       tabindex="0"
       role="button"
@@ -1007,6 +1008,15 @@ onMounted(async () => {
   outline: none;
   border-radius: 16px;
   box-shadow: 0 0 0 2px #ffffff;
+}
+
+/*
+ * 拖动期间**不画焦点环**（用户反馈"拖拽过程中有白色边框"）：按下时浏览器把焦点给精灵，
+ * 白环跟着鼠标跑一圈。拖动是纯鼠标操作，此时焦点可见性没有意义；
+ * 键盘 Tab 聚焦（非拖动）仍然画环。
+ */
+.sprite.dragging {
+  box-shadow: none;
 }
 
 /*

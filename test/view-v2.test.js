@@ -305,9 +305,10 @@ test('卡05 面板 · 等级行：var(--font-size-sm) + var(--fg-dim) + 单行�
   assert.match(style.slice(style.indexOf('.level-row {'), style.indexOf('.level {')), /overflow: hidden/, '行容器裁切')
 })
 
-test('卡05 面板 · 图标白色描边 + 白色 2px 焦点环 + .tip 即时显名（Q17/R53 基线）', () => {
+test('卡05 面板 · 图标白色描边 + 强调色 2px 焦点环 + .tip 即时显名（Q17/R53 基线，焦点环改色）', () => {
   const style = styleOf(panel)
-  const icon = style.slice(style.indexOf('.icon {'), style.indexOf('.close {'))
+  const iconStart = style.indexOf('\n.icon {')
+  const icon = style.slice(iconStart, style.indexOf('\n}', iconStart) + 2)
   assert.match(icon, /width: 22px/, '22px 图标（v1 尺寸）')
   assert.match(icon, /height: 22px/)
   assert.match(icon, /fill: none/)
@@ -317,13 +318,14 @@ test('卡05 面板 · 图标白色描边 + 白色 2px 焦点环 + .tip 即时显
   assert.ok(style.replace(/\s+/g, '').includes('stroke:#fff'), '面板源码（去空白）含 stroke:#fff')
 
   const actFocus = style.slice(style.indexOf('.act:focus-visible'), style.indexOf('.tip {'))
-  assert.match(actFocus, /box-shadow: 0 0 0 2px #ffffff/, '图标按钮焦点环白色 2px')
+  assert.match(actFocus, /box-shadow: 0 0 0 2px var\(--accent\)/, '图标按钮焦点环保留，但改用强调色（不要白边）')
   // 关闭按钮已移除（用户要求）⇒ 焦点环口径只剩图标按钮这一条
   assert.equal(style.includes('.close'), false, '关闭按钮的样式规则已删除')
 
-  const tip = style.slice(style.indexOf('.tip {'), style.indexOf('.icon {'))
+  const tipStart = style.indexOf('.tip {')
+  const tip = style.slice(tipStart, style.indexOf('\n}', tipStart) + 2)
   assert.match(tip, /position: absolute/, '.tip 是自绘浮层')
-  assert.match(tip, /bottom: calc\(100% \+ 6px\)/, '浮层在图标上方')
+  assert.match(tip, /bottom: calc\(100% \+ 8px\)/, '浮层在面板上方（不压等级行）')
   assert.equal(/transition/.test(tip), false, '悬浮即时显名（不得有过渡/延迟）')
   assert.equal(/transition-delay|animation-delay/.test(style), false, '面板内没有任何延迟动画')
   assert.match(style, /\.act:hover \.tip[\s\S]{0,120}visibility: visible/, 'hover 即时可见')
@@ -331,7 +333,7 @@ test('卡05 面板 · 图标白色描边 + 白色 2px 焦点环 + .tip 即时显
   assert.match(templateOf(panel), /<span class="tip" aria-hidden="true">/, '浮层 aria-hidden（可访问名只由 aria-label 承担）')
 })
 
-test('卡05 面板 · 只用宿主 token：除图标描边/焦点环的白色外一个自造色值都没有', () => {
+test('卡05 面板 · 只用宿主 token：除图标描边外一个自造色值都没有（悬停改图标变色）', () => {
   const style = styleOf(panel)
   for (const token of [
     'var(--bg-panel)',
@@ -339,21 +341,23 @@ test('卡05 面板 · 只用宿主 token：除图标描边/焦点环的白色外
     'var(--fg-dim)',
     'var(--fg-bright)',
     'var(--border)',
-    'var(--hover-bg)',
+    'var(--accent)',
     'var(--font-size-sm)'
   ]) {
     assert.ok(style.includes(token), `面板用到宿主 token ${token}`)
   }
-  // 白色只允许出现在"图标描边"与"焦点环"两处用户明确要求的位置
+  // 用户要求"不要白边"后：悬停/按下都靠图标描边变色，不再用 --hover-bg 画底
+  assert.equal(style.includes('var(--hover-bg)'), false, '不再使用 --hover-bg（改为图标变色）')
+  // 白色只允许出现在"图标描边"这一处用户明确要求的位置
   for (const hex of style.match(/#[0-9a-fA-F]{3,8}/g) ?? []) {
-    assert.equal(hex.toLowerCase(), '#ffffff', `只允许白色（白色线条/焦点环），发现自造色值 ${hex}`)
+    assert.equal(hex.toLowerCase(), '#ffffff', `只允许白色（图标线条），发现自造色值 ${hex}`)
   }
   assert.equal(/rgba?\(/.test(style), false, '不得有写死的 rgba/rgb 色值（v1 的玻璃底与青色渐变都已换成 token）')
   assert.equal(style.includes('--'), true)
-  // 图标按钮底色透明（Q17），悬浮用 token 的悬停背景
+  // 图标按钮底色透明（Q17），悬停用图标描边变色（不画底/描边）
   const act = style.slice(style.indexOf('.act {'), style.indexOf(".act[aria-disabled="))
   assert.match(act, /background: transparent/, '图标按钮底色透明')
-  assert.match(style, /:hover[\s\S]{0,80}background: var\(--hover-bg\)/, '悬浮背景取 --hover-bg')
+  assert.match(style, /:hover \.icon[\s\S]{0,60}stroke: var\(--fg-bright\)/, '悬浮：图标转亮')
   const off = style.slice(style.indexOf(".act[aria-disabled='true']"))
   assert.match(off.slice(0, 160), /opacity: 0\.45/, '禁用态 opacity .45')
   assert.match(off.slice(0, 160), /cursor: not-allowed/, '禁用态 cursor: not-allowed')

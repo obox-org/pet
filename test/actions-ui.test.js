@@ -116,22 +116,27 @@ test('卡17 面板 · 两枚图标按钮横向一行：喂食 / 洗澡，**没�
   assert.match(iconBlock, /stroke-linejoin: round/)
 })
 
-test('卡18 面板 · 图标按钮：底色透明（无渐变）、悬浮 token 背景 + 描边高亮、白色 2px 焦点环（Q17）', () => {
+test('卡18 面板 · 图标按钮：底色透明（无渐变）、**图标描边变色**表达悬浮/按下、强调色 2px 焦点环', () => {
   const style = styleOf(panel)
   const act = style.slice(style.indexOf('.act {'), style.indexOf(".act[aria-disabled='true']"))
   assert.match(act, /background: transparent/, 'Q17：按钮底色透明')
   assert.equal(style.includes('linear-gradient'), false, 'Q17：那层青色渐变底已删（产物 grep 同步为 0）')
   assert.equal(style.includes('#7dd3fc'), false, '渐变用的两个色值一并清掉')
-  assert.equal(style.includes('#38bdf8'), false, '（保留的只有白色线条与白色焦点环）')
-  // 悬浮：宿主 token 的悬停背景 + 描边高亮；禁用态排除在外（置灰的那一枚不该"看起来可用"）
-  assert.match(style, /\.act:not\(\[aria-disabled='true'\]\):hover/, '悬停高亮排除禁用态')
-  const hover = style.slice(style.indexOf(".act:not([aria-disabled='true']):hover"), style.indexOf(".act[aria-disabled='true']"))
-  assert.match(hover, /background: var\(--hover-bg\)/, '悬停背景用宿主 token（design 硬约束 1：零自造色值）')
-  assert.match(hover, /border-color: var\(--border\)/, '描边高亮用宿主 token')
-  // 焦点环是白色 2px（Q17）
+  assert.equal(style.includes('#38bdf8'), false, '（青色相关色值不再出现）')
+  // 用户要求：悬停/按下**不画底、不画描边**，只用图标描边变色（白色边框一律不要）
+  assert.match(style, /\.act:not\(\[aria-disabled='true'\]\):hover/, '悬停态排除禁用态')
+  const hover = style.slice(
+    style.indexOf(".act:not([aria-disabled='true']):hover"),
+    style.indexOf(".act[aria-disabled='true']")
+  )
+  assert.match(hover, /background: transparent/, '悬停不再画背景')
+  assert.match(hover, /border-color: transparent/, '悬停不再画描边')
+  assert.match(style, /\.act:not\(\[aria-disabled='true'\]\):hover \.icon\s*\{[^}]*stroke: var\(--fg-bright\)/, '悬停：图标转亮')
+  assert.match(style, /\.act:not\(\[aria-disabled='true'\]\):active \.icon[^{]*\{[^}]*stroke: var\(--accent\)/, '按下：图标转强调色')
+  // 焦点环改为强调色 2px（用户明确不要白边；键盘可见性保留）
   const focusBlock = style.slice(style.indexOf('.act:focus-visible'), style.indexOf('.tip {'))
-  assert.match(focusBlock, /box-shadow: 0 0 0 2px #ffffff/, '白色 2px 焦点环')
-  assert.equal(/\.act:focus-visible[^}]*rgba\(56, 189, 248/.test(style), false, '旧的青色焦点环已换掉')
+  assert.match(focusBlock, /box-shadow: 0 0 0 2px var\(--accent\)/, '强调色 2px 焦点环')
+  assert.equal(/#ffffff/.test(focusBlock), false, '焦点环里不再出现白色')
   // 禁用态不变（卡 17 口径）
   const off = style.slice(style.indexOf(".act[aria-disabled='true']"))
   assert.match(off.slice(0, 200), /opacity: 0\.45/)
@@ -140,7 +145,8 @@ test('卡18 面板 · 图标按钮：底色透明（无渐变）、悬浮 token 
 
 test('卡18 面板 · 悬浮浮层 .tip：浮到面板上方（不压等级行）、token 玻璃底 + token 文字 + 6px 圆角，hover/focus-visible 即时可见（无延迟）', () => {
   const style = styleOf(panel)
-  const tip = style.slice(style.indexOf('.tip {'), style.indexOf('.icon {'))
+  const tipStart = style.indexOf('.tip {')
+  const tip = style.slice(tipStart, style.indexOf('\n}', tipStart) + 2)
   assert.ok(tip.length > 0, '.tip 浮层样式存在')
   assert.match(tip, /position: absolute/, '自绘浮层（不是原生 title）')
   assert.match(tip, /bottom: calc\(100% \+ 8px\)/, '浮到面板上方（基准是 .panel，不是按钮）')

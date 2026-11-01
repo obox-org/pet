@@ -233,8 +233,27 @@ onMounted(() => {
  * "看起来可用"，但它的 `.tip` 浮层照常显示动作名（"为什么不能点"由禁用视觉表达）。
  */
 .act:not([aria-disabled='true']):hover {
-  background: var(--hover-bg);
-  border-color: var(--border);
+  /* 用户要求：悬停不再画底/描边，改用**图标描边变色**表达（白色边框一律不要） */
+  background: transparent;
+  border-color: transparent;
+  color: var(--fg-bright);
+}
+
+.act:not([aria-disabled='true']):hover .icon {
+  stroke: var(--fg-bright);
+}
+
+/* 按下（点击）反馈：图标转为强调色，比悬停更亮一档；同样不画边框 */
+.act:not([aria-disabled='true']):active .icon,
+.act:not([aria-disabled='true']):active:focus-visible .icon {
+  stroke: var(--accent);
+}
+
+/* 键盘焦点环：**强调色** 2px（不再是白色 2px —— 用户明确不要白边）。
+   保留 `:focus-visible` 语义 ⇒ 鼠标点按不画环，键盘 Tab 仍然可见。 */
+.act:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent);
 }
 
 /*
@@ -247,11 +266,7 @@ onMounted(() => {
   cursor: not-allowed;
 }
 
-/* 键盘焦点环：白色 2px（Q17）。保留 `:focus-visible` 语义 ⇒ 鼠标点按不会画环 */
-.act:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px #ffffff;
-}
+
 
 /*
  * 悬浮/键盘聚焦时**即时**显示的动作名浮层（Q17）。

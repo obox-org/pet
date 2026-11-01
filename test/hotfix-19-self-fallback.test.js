@@ -196,7 +196,7 @@ test('卡19 · 删除项防回归：入口与页面都不再有任何"按状态�
 
 // ————— 顺带：✕ 关闭按钮焦点环改白色（父代理裁定 R53 / 复验报告 O-2） —————
 
-test('卡19 · R53：面板已无 ✕ 关闭按钮，焦点环只剩两枚图标按钮的白色 2px', () => {
+test('卡19 · R53：面板已无 ✕ 关闭按钮，焦点环只剩两枚图标按钮的强调色 2px', () => {
   const style = panel.slice(panel.indexOf('<style scoped>'))
   // 用户要求移除关闭按钮 ⇒ 再留着 `.close*` 规则就是死代码，且会让人以为还有第三站
   assert.equal(style.includes('.close'), false, '关闭按钮的样式规则已整条删除')
@@ -206,7 +206,7 @@ test('卡19 · R53：面板已无 ✕ 关闭按钮，焦点环只剩两枚图标
   // 焦点环口径仍然只有一条：图标按钮白色 2px，且不留系统轮廓
   const act = style.slice(style.indexOf('.act:focus-visible'), style.indexOf('.sync-hint'))
   assert.match(act, /outline: none/, '沿用既有口径：不留系统轮廓')
-  assert.match(act, /box-shadow: 0 0 0 2px #ffffff/, '白色 2px')
+  assert.match(act, /box-shadow: 0 0 0 2px var\(--accent\)/, '强调色 2px（用户明确不要白边）')
   assert.equal(/rgba\(56, 189, 248/.test(panel), false, '旧的青色焦点环色值已整条消失')
   assert.equal(/#38bdf8/.test(panel), false, '短写形式同样不再出现')
   // 两枚图标仍在
