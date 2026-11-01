@@ -158,6 +158,8 @@ export default function pet(api) {
   let forceQueued = false // 在途写盘期间又来一次**强制**落盘 ⇒ 记欠账，写完补一次（见 persistState）
   // ————— 卡 15 新增的运行时状态（同样随 cleanup 一起消亡） —————
   let dragging = false // 拖动中（design D-13 互斥：抑制随机表演、不弹气泡）
+  // 跟手拖动（2.0.3）：beginDrag 成功后，定位交给主进程按全局光标执行；老宿主没有该方法 ⇒ false，退回增量路径
+  let dragFollowing = false
   let positionReplyWarned = false // overlay 成功回包却没带 position（R31 之前的宿主）⇒ 只 warn 一次
   let noSetPositionWarned = false // 宿主根本没有 setPosition ⇒ 只 warn 一次（拖动降级为"不移动"）
   /**
@@ -1049,6 +1051,19 @@ export default function pet(api) {
 
             if (phase === 'start') {
               dragging = true
+              // 跟手拖动（2.0.3）：把定位交给主进程（按全局光标 16ms 跟随）。
+              // 为什么需要：页面靠 pointermove 算增量，而窗口每帧在动——快速拖动时指针会跑出窗口、
+              // 事件断流 ⇒ 窗体停在原地（用户反馈"鼠标和宠物脱离"）。老宿主没有 beginDrag ⇒ 退回老路径。
+              try {
+                const res =
+                  typeof api.overlay.beginDrag === 'function'
+                    ? await api.overlay.beginDrag(OVERLAY_ID)
+                    : null
+                dragFollowing = !!(res && res.ok)
+              } catch (err) {
+                dragFollowing = false
+                console.warn('[pet] beginDrag 失败，退回增量拖动：' + errMsg(err))
+              }
               // D-13 互斥①：拖动期间不触发随机表演。卡 18 起不需要"清定时器"——1 分钟（60 秒）周期定时器
               // 一直在跑，靠 onRandomPerf 入口处的 `dragging` 判定跳过（拖动结束自动恢复，无需重排）。
               // D-13 互斥②（v2 修订）：加上 buildView 的 dragging 折叠（入口自发表演 → idle、气泡置 null），
@@ -1059,6 +1074,8 @@ export default function pet(api) {
             }
 
             if (phase === 'move') {
+              // 跟手模式下主进程已在按光标移动，页面不再自己算增量（两套同时算会互相拉扯）
+              if (dragFollowing) return { ok: true }
               const base = state.position
               let target
               if (base) {
@@ -1078,6 +1095,19 @@ export default function pet(api) {
 
             // phase === 'end'
             dragging = false
+            // 收掉跟手会话，并用主进程回传的**实际坐标**校正自记位置（钳位后的真实值）
+            if (dragFollowing) {
+              try {
+                const res =
+                  typeof api.overlay.endDrag === 'function'
+                    ? await api.overlay.endDrag(OVERLAY_ID)
+                    : null
+                if (res && res.ok && res.position) state = { ...state, position: res.position }
+              } catch (err) {
+                console.warn('[pet] endDrag 失败（松手照常继续）：' + errMsg(err))
+              }
+              dragFollowing = false
+            }
             const now = Date.now()
             // design D-3 第二条硬细节：「任何成功互动与**拖动结束**后 MUST 把 `lastAfkAt` 推到当前时刻，
             // 下一次挂机奖励在之后 1200 秒」——松手算一次用户在场，挂机计时从这一刻重新开始。
