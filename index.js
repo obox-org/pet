@@ -1147,6 +1147,20 @@ export default function pet(api) {
   api.statusBar.setText(STATUSBAR_ID, STATUSBAR_IDLE)
 
   // ————— 启动序列（D-5"启动"：读档 ⇒ 归一 ⇒ 按设置建窗（建窗即起时钟）⇒ 迁移收尾） —————
+  /**
+   * 外部 HTTP 指令（2.0.3）：`POST /command {"command":"pet_chenzhi:state"}`。
+   * 只读：回当前视图（等级名/数值/气泡），不触发写盘或互动。
+   * 老宿主没有 `api.http` ⇒ 可选链跳过，扩展照常工作。
+   */
+  const offHttp =
+    typeof api.http?.register === 'function'
+      ? api.http.register('state', async () => {
+          await initPromise
+          if (!state) return { ok: false, error: TEXT.notReady }
+          return { ok: true, rev, view: currentView(Date.now()) }
+        })
+      : null
+
   const initPromise = (async () => {
     // 全量兜底：init 任何一步意外抛错（宿主拆除竞态、settings 存储异常……）都不能让
     // 扩展变成"消息面永远 notReady、时钟永远不起"的半残状态（D-9"不抛出、不影响宿主"）
@@ -1201,6 +1215,8 @@ export default function pet(api) {
     hub.drain({ ok: false, error: TEXT.windowClosed }) // 丢弃全部 pending 长轮询（任务卡：cleanup 三件事之一）
     offMessage.dispose()
     offSettings.dispose()
+    // 2.0.3：外部 HTTP 指令随扩展停用一起注销（老宿主没有 api.http ⇒ 可选链跳过）
+    if (typeof offHttp === 'function') offHttp()
     if (overlayAlive) {
       overlayAlive = false
       void api.overlay.destroy(OVERLAY_ID) // 宿主停用也会自动回收 overlay（src/api/types.ts:198）；destroy 幂等，双保险
